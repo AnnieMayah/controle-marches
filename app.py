@@ -13,7 +13,7 @@ def create_app(config=None):
     try:
         from config_db import DATABASE_URI
     except ImportError:
-        DATABASE_URI = "postgresql+psycopg2://postgres:2112@localhost:5432/controle_marches_publics"
+        raise RuntimeError("config_db.py manquant : crée-le avec DATABASE_URI.")
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
