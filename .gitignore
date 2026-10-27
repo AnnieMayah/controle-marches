@@ -1,0 +1,9 @@
+venv/
+__pycache__/
+*.pyc
+uploads/
+config_db.py
+config_mail.py
+.env
+*.log
+.env
