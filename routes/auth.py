@@ -14,11 +14,11 @@ from datetime import datetime, timedelta
 from flask import Blueprint, request, jsonify
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
-
+from flask import Blueprint, request, jsonify, g
 import mailer
 from extensions import db
 from models import Utilisateur, CodeVerification
-
+from securite import creer_jeton, connexion_requise, role_requis
 auth_bp = Blueprint("auth", __name__)
 
 DUREE_CODE_MIN = 10
@@ -111,8 +111,7 @@ def login():
         return jsonify({"erreur": "Identifiants incorrects."}), 401
     if not utilisateur.actif:
         return jsonify({"erreur": "Ce compte est désactivé."}), 403
-    return jsonify(_utilisateur_en_dict(utilisateur))
-
+    return jsonify({**_utilisateur_en_dict(utilisateur), "jeton": creer_jeton(utilisateur)})
 
 # ----------------------------------------------------------------- inscription (code par e-mail)
 @auth_bp.route("/inscription", methods=["POST"])
@@ -240,11 +239,13 @@ def reinitialiser():
 
 # ----------------------------------------------------------------- gestion des comptes
 @auth_bp.route("/utilisateurs", methods=["GET"])
+@role_requis("ADMIN")
 def lister_utilisateurs():
     return jsonify([_utilisateur_en_dict(u) for u in Utilisateur.query.order_by(Utilisateur.id).all()])
 
 
 @auth_bp.route("/utilisateurs", methods=["POST"])
+@role_requis("ADMIN")
 def creer_utilisateur():
     """Création d'un compte par un administrateur (sans vérification par e-mail)."""
     d = request.get_json() or {}
@@ -272,9 +273,10 @@ def creer_utilisateur():
 
 
 @auth_bp.route("/mot-de-passe", methods=["PUT"])
+@connexion_requise
 def changer_mot_de_passe():
     d = request.get_json() or {}
-    utilisateur = Utilisateur.query.get_or_404(d.get("id_utilisateur"))
+    utilisateur = g.utilisateur
     if not check_password_hash(utilisateur.mot_de_passe_hash, d.get("ancien") or ""):
         return jsonify({"erreur": "L'ancien mot de passe est incorrect."}), 400
     erreur = _valider_mot_de_passe(d.get("nouveau"))
@@ -286,6 +288,7 @@ def changer_mot_de_passe():
 
 
 @auth_bp.route("/utilisateurs/<int:id_utilisateur>/actif", methods=["PUT"])
+@role_requis("ADMIN")
 def basculer_actif(id_utilisateur):
     utilisateur = Utilisateur.query.get_or_404(id_utilisateur)
     utilisateur.actif = not utilisateur.actif
@@ -294,11 +297,12 @@ def basculer_actif(id_utilisateur):
 
 
 @auth_bp.route("/utilisateurs/<int:id_utilisateur>/role", methods=["PUT"])
+@role_requis("ADMIN")
 def changer_role(id_utilisateur):
     d = request.get_json() or {}
     if d.get("role") not in ROLES:
         return jsonify({"erreur": "Rôle invalide."}), 400
-    if d.get("id_demandeur") == id_utilisateur:
+    if g.utilisateur.id == id_utilisateur:
         return jsonify({"erreur": "Tu ne peux pas modifier ton propre rôle."}), 400
     utilisateur = Utilisateur.query.get_or_404(id_utilisateur)
     utilisateur.role = d["role"]

@@ -7,7 +7,7 @@ from models import Marche
 from collections import defaultdict
 from models import Controle
 from services import detecter_anomalies, calculer_score_risque
-
+from routes.prmp import infos_prmp
 marches_bp = Blueprint("marches", __name__)
 
 
@@ -126,5 +126,5 @@ def _marche_en_dict(m):
         "titulaire": m.titulaire, "annee_exercice": m.annee_exercice, "hors_ppm": m.hors_ppm,
         "marche_regularisation": m.marche_regularisation, "nature": m.nature.libelle,
         "mode_passation": m.mode_passation.libelle, "entite": m.entite.nom,
-        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation,
+        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation, **infos_prmp(m),
     }

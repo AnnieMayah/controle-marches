@@ -5,11 +5,11 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from extensions import db
-
+from securite import proteger_api
 def create_app(config=None):
     app = Flask(__name__)
     CORS(app)  # autorise les appels depuis React (ex: http://localhost:5173)
-
+    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-moi-avant-la-soutenance")
     try:
         from config_db import DATABASE_URI
     except ImportError:
@@ -46,6 +46,7 @@ def create_app(config=None):
     from routes.rapports import rapports_bp
     from routes.recherche import recherche_bp
     from routes.notifications import notifications_bp
+    from routes.prmp import prmp_bp
     app.register_blueprint(marches_bp, url_prefix="/api/marches")
     app.register_blueprint(controles_bp, url_prefix="/api/controles")
     app.register_blueprint(documents_bp, url_prefix="/api/documents")
@@ -58,7 +59,8 @@ def create_app(config=None):
     app.register_blueprint(rapports_bp, url_prefix="/api/rapports")
     app.register_blueprint(recherche_bp, url_prefix="/api/recherche")
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
-
+    app.register_blueprint(prmp_bp, url_prefix="/api")
+    proteger_api(app)
     return app
 
 
