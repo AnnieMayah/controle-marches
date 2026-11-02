@@ -9,7 +9,10 @@ from securite import proteger_api
 def create_app(config=None):
     app = Flask(__name__)
     CORS(app)  # autorise les appels depuis React (ex: http://localhost:5173)
-    app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "change-moi-avant-la-soutenance")
+    secret = os.environ.get("SECRET_KEY")
+    if not secret:
+        raise RuntimeError("SECRET_KEY manquante : définis la variable d'environnement.")
+    app.config["SECRET_KEY"] = secret
     try:
         from config_db import DATABASE_URI
     except ImportError:
