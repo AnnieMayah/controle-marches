@@ -72,6 +72,7 @@ class Marche(db.Model):
     id_prmp = db.Column(db.Integer, db.ForeignKey("prmp.id"), nullable=True)
     id_nature = db.Column(db.Integer, db.ForeignKey("natures_marche.id"), nullable=False)
     id_mode_passation = db.Column(db.Integer, db.ForeignKey("modes_passation.id"), nullable=False)
+    id_objet = db.Column(db.Integer, db.ForeignKey("objets_marche.id"))
     montant = db.Column(db.Numeric(16, 2), nullable=False)
     titulaire = db.Column(db.String(150))
     date_signature = db.Column(db.Date)
@@ -167,3 +168,9 @@ class CodeVerification(db.Model):
     tentatives = db.Column(db.Integer, nullable=False, default=0)
     utilise = db.Column(db.Boolean, nullable=False, default=False)
     date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+
+class ObjetMarche(db.Model):
+    __tablename__ = "objets_marche"
+    id = db.Column(db.Integer, primary_key=True)
+    compte = db.Column(db.String(10), nullable=False)
+    libelle = db.Column(db.Text, nullable=False, unique=True)

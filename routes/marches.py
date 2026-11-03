@@ -8,6 +8,7 @@ from collections import defaultdict
 from models import Controle
 from services import detecter_anomalies, calculer_score_risque
 from routes.prmp import infos_prmp
+from routes.objets import infos_objet
 marches_bp = Blueprint("marches", __name__)
 
 
@@ -64,7 +65,7 @@ def creer_marche():
         return jsonify({"erreur": "Un marché avec cette référence existe déjà."}), 409
     marche = Marche(
         reference=data["reference"], objet=data["objet"], id_entite=data["id_entite"],
-        id_prmp=data.get("id_prmp"), id_nature=data["id_nature"],
+        id_prmp=data.get("id_prmp"), id_objet=data.get("id_objet"), id_nature=data["id_nature"],
         id_mode_passation=data["id_mode_passation"], montant=data["montant"],
         titulaire=data.get("titulaire"), annee_exercice=data["annee_exercice"],
         hors_ppm=data.get("hors_ppm", False), marche_regularisation=data.get("marche_regularisation", False),
@@ -84,7 +85,7 @@ def modifier_marche(id_marche):
     autre = Marche.query.filter_by(reference=data.get("reference", marche.reference)).first()
     if autre and autre.id != marche.id:
         return jsonify({"erreur": "Un marché avec cette référence existe déjà."}), 409
-    for champ in ["reference", "objet", "id_entite", "id_prmp", "id_nature", "id_mode_passation",
+    for champ in ["reference", "objet", "id_entite", "id_prmp", "id_objet", "id_nature", "id_mode_passation",
                   "montant", "titulaire", "annee_exercice", "hors_ppm", "marche_regularisation"]:
         if champ in data:
             setattr(marche, champ, data[champ])
@@ -126,5 +127,5 @@ def _marche_en_dict(m):
         "titulaire": m.titulaire, "annee_exercice": m.annee_exercice, "hors_ppm": m.hors_ppm,
         "marche_regularisation": m.marche_regularisation, "nature": m.nature.libelle,
         "mode_passation": m.mode_passation.libelle, "entite": m.entite.nom,
-        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation, **infos_prmp(m),
+        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation, **infos_prmp(m),**infos_objet(m),
     }

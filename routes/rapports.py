@@ -15,7 +15,7 @@ from xml.sax.saxutils import escape
 import io
 from services import detecter_anomalies
 from models import Marche, Controle, ControleEtape, Irregularite
-
+from routes.objets import compte_marche
 rapports_bp = Blueprint("rapports", __name__)
 
 TITRE = "LISTE DES IRRÉGULARITÉS ET ANOMALIES CONSTATÉES ET LES PROCÉDURES APPLICABLES"
@@ -93,7 +93,7 @@ def _en_tete(marche):
         ("Entité", marche.entite.nom),
         ("Personne Responsable de la conduite de la procédure", prmp),
         ("Qualité de la Personne Responsable de la conduite de la procédure", "PRMP" if prmp else None),
-    ], marche.annee_exercice, getattr(marche, "compte", None)
+    ], marche.annee_exercice, compte_marche(marche)
 
 
 # ---------------------------------------------------------------------------
