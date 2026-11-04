@@ -124,7 +124,7 @@ class Irregularite(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     id_controle_etape = db.Column(db.Integer, db.ForeignKey("controle_etapes.id"), nullable=False)
     description = db.Column(db.Text, nullable=False)
-    texte_applicable = db.Column(db.String(255))
+    texte_applicable = db.Column(db.Text)
     risque = db.Column(db.String(255))
     recommandation = db.Column(db.Text)
     impacte_attribution = db.Column(db.Boolean, nullable=False, default=False)
