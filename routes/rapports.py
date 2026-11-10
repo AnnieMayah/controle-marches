@@ -16,6 +16,8 @@ import io
 from services import detecter_anomalies
 from models import Marche, Controle, ControleEtape, Irregularite
 from routes.objets import compte_marche
+from extensions import db
+from models import Utilisateur
 rapports_bp = Blueprint("rapports", __name__)
 
 TITRE = "LISTE DES IRRÉGULARITÉS ET ANOMALIES CONSTATÉES ET LES PROCÉDURES APPLICABLES"
@@ -93,6 +95,7 @@ def _en_tete(marche):
         ("Entité", marche.entite.nom),
         ("Personne Responsable de la conduite de la procédure", prmp),
         ("Qualité de la Personne Responsable de la conduite de la procédure", "PRMP" if prmp else None),
+        ("Nom des contrôleurs", _noms_controleurs(marche)),
     ], marche.annee_exercice, compte_marche(marche)
 
 
@@ -285,3 +288,15 @@ def rapport_global_docx():
                                              fin=_date(request.args.get("fin")), region=(request.args.get("region") or "").strip() or None)
     return send_file(fichier, as_attachment=True, download_name=f"Rapport_global_controles_{exercice}.docx",
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    def _noms_controleurs(marche):
+        controle = Controle.query.filter_by(id_marche=marche.id).order_by(Controle.id.desc()).first()
+        if controle is None:
+            return None
+        ids = {e.id_utilisateur for e in ControleEtape.query.filter_by(id_controle=controle.id).all() if e.id_utilisateur}
+        noms = []
+        for i in sorted(ids):
+            u = db.session.get(Utilisateur, i)
+            if u:
+                noms.append(" ".join(x for x in [u.prenom, u.nom] if x))
+        return ", ".join(noms) or None

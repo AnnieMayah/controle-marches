@@ -51,6 +51,7 @@ def create_app(config=None):
     from routes.notifications import notifications_bp
     from routes.prmp import prmp_bp
     from routes.objets import objets_bp
+    from routes.transferts import transferts_bp
     app.register_blueprint(marches_bp, url_prefix="/api/marches")
     app.register_blueprint(controles_bp, url_prefix="/api/controles")
     app.register_blueprint(documents_bp, url_prefix="/api/documents")
@@ -65,6 +66,7 @@ def create_app(config=None):
     app.register_blueprint(notifications_bp, url_prefix="/api/notifications")
     app.register_blueprint(prmp_bp, url_prefix="/api")
     app.register_blueprint(objets_bp, url_prefix="/api")
+    app.register_blueprint(transferts_bp, url_prefix="/api")
     proteger_api(app)
     return app
 

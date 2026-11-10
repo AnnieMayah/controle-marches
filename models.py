@@ -83,12 +83,21 @@ class Marche(db.Model):
     marche_regularisation = db.Column(db.Boolean, nullable=False, default=False)
     id_utilisateur_saisie = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"), nullable=True)
     date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
+    numero_saisie = db.Column(db.String(30))
+    direction_service = db.Column(db.String(150))
+    forme_contrat = db.Column(db.String(20))
+    montant_min = db.Column(db.Numeric(16, 2))
+    montant_max = db.Column(db.Numeric(16, 2))
+    montant_tef = db.Column(db.Numeric(16, 2))
+    forme_prix = db.Column(db.String(20))
+    delai_execution = db.Column(db.String(60))
+    financement = db.Column(db.String(100))
 
     entite = db.relationship("Entite", backref="marches")
     prmp = db.relationship("Prmp")
     nature = db.relationship("NatureMarche")
     mode_passation = db.relationship("ModePassation")
-
+     
 
 class Controle(db.Model):
     __tablename__ = "controles"

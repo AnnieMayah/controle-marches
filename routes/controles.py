@@ -5,7 +5,8 @@ from flask import Blueprint, request, jsonify
 from extensions import db
 from models import Controle, ControleEtape, Etape, Marche
 from services import recalculer_conclusion, valider_controle
-
+import champs_marche
+from routes.transferts import _niveau_actuel as niveau_actuel
 controles_bp = Blueprint("controles", __name__)
 
 
@@ -61,9 +62,11 @@ def saisir_note_etape(id_controle):
     controle = Controle.query.get_or_404(id_controle)
     if controle.date_validation:
         return jsonify({"erreur": "Ce contrôle est validé : il n'est plus modifiable."}), 409
-
+    
     data = request.get_json()
     note = data.get("note")
+    if niveau_actuel(id_controle) == "VALIDATION":
+        return jsonify({"erreur": "Le contrôle est au niveau VALIDATION : les notes ne sont plus modifiables. Renvoie-le à un niveau précédent."}), 409
     if note is None or not (0 <= int(note) <= 4):
         return jsonify({"erreur": "La note doit être comprise entre 0 et 4."}), 400
 
@@ -93,6 +96,8 @@ def valider(id_controle):
     notees = ControleEtape.query.filter(
         ControleEtape.id_controle == id_controle, ControleEtape.note.isnot(None)
     ).count()
+    if niveau_actuel(id_controle) != "VALIDATION":
+        return jsonify({"erreur": "Le contrôle doit être au niveau VALIDATION pour être validé définitivement."}), 409
     if notees < total_etapes:
         return jsonify({"erreur": f"Toutes les étapes doivent être notées avant validation ({notees}/{total_etapes})."}), 400
 
@@ -116,6 +121,7 @@ def _controle_resume(c):
         "note_globale": float(c.note_globale) if c.note_globale is not None else None,
         "conclusion": c.conclusion,
         "nb_etapes_notees": notees,
+        "niveau": niveau_actuel(c.id),
         "valide": c.date_validation is not None,
         "date_validation": c.date_validation.isoformat() if c.date_validation else None,
     }
@@ -128,4 +134,5 @@ def _marche_resume(m):
         "montant": float(m.montant), "titulaire": m.titulaire,
         "annee_exercice": m.annee_exercice, "hors_ppm": m.hors_ppm,
         "marche_regularisation": m.marche_regularisation,
+        **champs_marche.infos_generales(m),
     }
