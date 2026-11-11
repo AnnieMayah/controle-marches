@@ -37,7 +37,7 @@ def _roles_exiges(chemin, methode):
     regles = {
         "/api/marches": ROLES_DONNEES, "/api/entites": ROLES_DONNEES, "/api/prmp": ROLES_DONNEES,
         "/api/documents": ROLES_DOCUMENTS,
-        "/api/irregularites": ROLES_NOTER, "/api/recommandations": ROLES_NOTER,
+        "/api/irregularites": ROLES_NOTER, "/api/recommandations": ROLES_NOTER, "/api/preuves": ROLES_NOTER,
     }
     for prefixe, roles in regles.items():
         if chemin == prefixe or chemin.startswith(prefixe + "/"):
@@ -120,3 +120,13 @@ def proteger_api(app, prefixe="/api"):
         if roles is not None and role not in roles:
             return jsonify({"erreur": "Accès refusé : droits insuffisants."}), 403
         return None
+
+
+def peut_voir_entite(id_entite):
+    """Un utilisateur de rôle ENTITE ne voit que les données de sa propre entité ; les autres rôles voient tout."""
+    u = getattr(g, "utilisateur", None)
+    if u is None:
+        return True
+    if getattr(u.role, "value", u.role) != "ENTITE":
+        return True
+    return getattr(u, "id_entite", None) == id_entite

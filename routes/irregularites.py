@@ -3,7 +3,7 @@ Routes API REST pour les irrégularités constatées lors d'une étape de contr�
 """
 from flask import Blueprint, request, jsonify
 from extensions import db
-from models import Irregularite, ControleEtape
+from models import Irregularite, ControleEtape, Controle
 from services import recalculer_conclusion
 
 irregularites_bp = Blueprint("irregularites", __name__)
@@ -49,6 +49,24 @@ def ajouter_irregularite():
     recalculer_conclusion(etape.id_controle)
 
     return jsonify(_irregularite_en_dict(irregularite)), 201
+
+
+@irregularites_bp.route("/<int:id_irregularite>", methods=["PUT"])
+def modifier_irregularite(id_irregularite):
+    irr = Irregularite.query.get_or_404(id_irregularite)
+    d = request.get_json() or {}
+    etape = ControleEtape.query.get(irr.id_controle_etape)
+    if Controle.query.get(etape.id_controle).date_validation is not None:
+        return jsonify({"erreur": "Ce contrôle est validé : il n'est plus modifiable."}), 409
+    description = (d.get("description") or "").strip()
+    if not description:
+        return jsonify({"erreur": "La description du constat est obligatoire."}), 400
+    irr.description = description
+    irr.texte_applicable = (d.get("texte_applicable") or "").strip() or None
+    irr.risque = d.get("risque") or irr.risque
+    irr.recommandation = (d.get("recommandation") or "").strip() or None
+    db.session.commit()
+    return jsonify({"id": irr.id})
 
 
 @irregularites_bp.route("/<int:id_irregularite>", methods=["DELETE"])

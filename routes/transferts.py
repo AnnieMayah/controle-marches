@@ -111,3 +111,12 @@ def renvoyer(id_controle):
         return jsonify({"erreur": "Indique le motif du renvoi."}), 400
     _enregistrer(controle, NIVEAUX[NIVEAUX.index(niveau) - 1], "RENVOI", motif)
     return jsonify(_circuit(controle))
+
+
+@transferts_bp.route("/transferts/a-traiter", methods=["GET"])
+@connexion_requise
+def a_traiter():
+    """Identifiants des contrôles non validés qui se trouvent au niveau de l'utilisateur connecté."""
+    ids = [c.id for c in Controle.query.filter(Controle.date_validation.is_(None)).all()
+           if _peut_agir(g.utilisateur, _niveau_actuel(c.id))]
+    return jsonify({"ids": ids})

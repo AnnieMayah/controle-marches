@@ -9,13 +9,15 @@ from models import Controle
 from services import detecter_anomalies, calculer_score_risque
 from routes.prmp import infos_prmp
 from routes.objets import infos_objet
+from anomalies_detaillees import detecter_detaille
+from securite import peut_voir_entite
 import champs_marche
 marches_bp = Blueprint("marches", __name__)
 
 
 @marches_bp.route("", methods=["GET"])
 def lister_marches():
-    marches = Marche.query.all()
+    marches = [m for m in Marche.query.all() if peut_voir_entite(m.id_entite)]
     return jsonify([_marche_en_dict(m) for m in marches])
 
 
@@ -35,6 +37,8 @@ def marches_a_risque():
 
     resultats = []
     for m in Marche.query.all():
+        if not peut_voir_entite(m.id_entite):
+            continue
         total, non_conformes = bilan[m.id_entite]
         anomalies = detecter_anomalies(m)
         score = calculer_score_risque(m, (non_conformes / total) if total else 0)
@@ -53,6 +57,8 @@ def marches_a_risque():
 @marches_bp.route("/<int:id_marche>", methods=["GET"])
 def obtenir_marche(id_marche):
     marche = Marche.query.get_or_404(id_marche)
+    if not peut_voir_entite(marche.id_entite):
+        return jsonify({"erreur": "Accès refusé."}), 403
     return jsonify(_marche_en_dict(marche))
 
 
@@ -111,6 +117,12 @@ def detecter_anomalies_marche(id_marche):
     return jsonify({"id_marche": id_marche, "suggestions": suggestions})
 
 
+@marches_bp.route("/<int:id_marche>/anomalies-detaillees", methods=["GET"])
+def anomalies_detaillees(id_marche):
+    marche = Marche.query.get_or_404(id_marche)
+    return jsonify({"suggestions": detecter_detaille(marche)})
+
+
 def _valider(data, partiel=False):
     """Retourne un message d'erreur si les données sont invalides, sinon None."""
     if not partiel:
@@ -130,5 +142,6 @@ def _marche_en_dict(m):
         "titulaire": m.titulaire, "annee_exercice": m.annee_exercice, "hors_ppm": m.hors_ppm,
         "marche_regularisation": m.marche_regularisation, "nature": m.nature.libelle,
         "mode_passation": m.mode_passation.libelle, "entite": m.entite.nom,
-        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation, **infos_prmp(m),**infos_objet(m),**champs_marche.infos_generales(m),
+        "id_entite": m.id_entite, "id_nature": m.id_nature, "id_mode_passation": m.id_mode_passation,
+        **infos_prmp(m), **infos_objet(m), **champs_marche.infos_generales(m),
     }

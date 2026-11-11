@@ -8,7 +8,7 @@ from flask import Blueprint, jsonify
 from sqlalchemy import func
 from extensions import db
 from models import (Marche, NatureMarche, ModePassation, Controle, Entite, Irregularite)
-
+import calendar
 statistiques_bp = Blueprint("statistiques", __name__)
 
 MOIS = ["Jan", "Fév", "Mar", "Avr", "Mai", "Juin", "Juil", "Août", "Sept", "Oct", "Nov", "Déc"]
@@ -28,6 +28,9 @@ def _delta_pct(courant, precedent):
 def _mois_precedent(d):
     return (d.year - 1, 12) if d.month == 1 else (d.year, d.month - 1)
 
+def _compte_periode(dates, annee_mois, jour):
+    """Nombre de dates situées dans le mois donné, du 1er jusqu'au jour indiqué (inclus)."""
+    return sum(1 for d in dates if d and (d.year, d.month) == annee_mois and d.day <= jour)
 
 @statistiques_bp.route("/resume", methods=["GET"])
 def resume():
@@ -38,12 +41,15 @@ def resume():
 
     controles = Controle.query.all()
     valides = [c for c in controles if c.date_validation]
-
-    planifies_courant = sum(1 for c in controles if c.date_controle and (c.date_controle.year, c.date_controle.month) == mois_courant)
-    planifies_prec = sum(1 for c in controles if c.date_controle and (c.date_controle.year, c.date_controle.month) == mois_prec)
-    realises_courant = sum(1 for c in valides if (c.date_validation.year, c.date_validation.month) == mois_courant)
-    realises_prec = sum(1 for c in valides if (c.date_validation.year, c.date_validation.month) == mois_prec)
-
+    
+    jour = aujourd_hui.day
+    jour_prec = min(jour, calendar.monthrange(*mois_prec)[1])
+    dates_planifiees = [c.date_controle for c in controles]
+    dates_realisees = [c.date_validation for c in valides]
+    planifies_courant = _compte_periode(dates_planifiees, mois_courant, jour)
+    planifies_prec = _compte_periode(dates_planifiees, mois_prec, jour_prec)
+    realises_courant = _compte_periode(dates_realisees, mois_courant, jour)
+    realises_prec = _compte_periode(dates_realisees, mois_prec, jour_prec)
     total_irregularites = Irregularite.query.count()
     critiques = Irregularite.query.filter_by(impacte_attribution=True).count()
     entites_controlees = len({c.marche.id_entite for c in controles})

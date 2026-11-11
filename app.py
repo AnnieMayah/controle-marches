@@ -1,11 +1,13 @@
 """
-Point d'entrÃ©e Flask â€” configuration et enregistrement des routes.
+Point d'entrée Flask — configuration et enregistrement des routes.
 """
 import os
 from flask import Flask
 from flask_cors import CORS
 from extensions import db
 from securite import proteger_api
+
+
 def create_app(config=None):
     app = Flask(__name__)
     CORS(app)  # autorise les appels depuis React (ex: http://localhost:5173)
@@ -20,7 +22,7 @@ def create_app(config=None):
     app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    # Dossier oÃ¹ sont stockÃ©s les fichiers uploadÃ©s (DAO, PV, contrats...)
+    # Dossier où sont stockés les fichiers uploadés (DAO, PV, contrats...)
     app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
@@ -29,13 +31,13 @@ def create_app(config=None):
 
     db.init_app(app)
 
-    # crÃ©e la table des codes de vÃ©rification si elle n'existe pas encore (aucune migration manuelle nÃ©cessaire)
+    # crée la table des codes de vérification si elle n'existe pas encore (aucune migration manuelle nécessaire)
     with app.app_context():
         try:
             from models import CodeVerification
             CodeVerification.__table__.create(bind=db.engine, checkfirst=True)
-        except Exception as e:  # base injoignable au dÃ©marrage : l'erreur apparaÃ®tra Ã  la premiÃ¨re requÃªte
-            print("Avertissement : table codes_verification non vÃ©rifiÃ©e :", e)
+        except Exception as e:  # base injoignable au démarrage : l'erreur apparaîtra à la première requête
+            print("Avertissement : table codes_verification non vérifiée :", e)
 
     from routes.marches import marches_bp
     from routes.controles import controles_bp
@@ -52,6 +54,7 @@ def create_app(config=None):
     from routes.prmp import prmp_bp
     from routes.objets import objets_bp
     from routes.transferts import transferts_bp
+    from routes.preuves import preuves_bp
     app.register_blueprint(marches_bp, url_prefix="/api/marches")
     app.register_blueprint(controles_bp, url_prefix="/api/controles")
     app.register_blueprint(documents_bp, url_prefix="/api/documents")
@@ -67,6 +70,7 @@ def create_app(config=None):
     app.register_blueprint(prmp_bp, url_prefix="/api")
     app.register_blueprint(objets_bp, url_prefix="/api")
     app.register_blueprint(transferts_bp, url_prefix="/api")
+    app.register_blueprint(preuves_bp, url_prefix="/api")
     proteger_api(app)
     return app
 

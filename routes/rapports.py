@@ -4,7 +4,7 @@ Génération du rapport de contrôle (PDF ou Word) pour un marché donné, au fo
 et du rapport global Word.
 """
 from datetime import date, datetime
-from flask import Blueprint, send_file, request, jsonify
+from flask import Blueprint, send_file, request, jsonify, abort
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
@@ -14,6 +14,9 @@ from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from xml.sax.saxutils import escape
 import io
 from services import detecter_anomalies
+from anomalies_detaillees import detecter_detaille
+from securite import peut_voir_entite
+from routes.preuves import noms_pieces
 from models import Marche, Controle, ControleEtape, Irregularite
 from routes.objets import compte_marche
 from extensions import db
@@ -29,7 +32,8 @@ EN_TETES = ["Irrégularités et Anomalies constatées", "Procédures applicables
 # ---------------------------------------------------------------------------
 
 def _anomalies_detectees(marche):
-    return detecter_anomalies(marche)
+    return detecter_detaille(marche)
+
 
 def _normaliser(item):
     """Accepte une chaîne, un dict ou un objet : renvoie (étape, description, texte applicable)."""
@@ -41,23 +45,35 @@ def _normaliser(item):
     return etape, get("description") or get("message") or str(item), get("texte_applicable")
 
 
+def _controle_du_rapport(id_marche):
+    """Contrôle validé le plus récent s'il existe, sinon le dernier contrôle."""
+    base = Controle.query.filter_by(id_marche=id_marche)
+    return (base.filter(Controle.date_validation.isnot(None)).order_by(Controle.id.desc()).first()
+            or base.order_by(Controle.id.desc()).first())
+
+
 def _donnees_rapport(id_marche):
     """Retourne (marche, groupes, conclusion).
     groupes : [(titre_étape, [(description, texte_applicable, observation), ...]), ...]
     conclusion : « Procédure conforme » / « Procédure non conforme » / None (pas de contrôle)."""
     marche = Marche.query.get_or_404(id_marche)
-    controle = Controle.query.filter_by(id_marche=id_marche).order_by(Controle.id.desc()).first()
+    if not peut_voir_entite(marche.id_entite):
+        abort(403)
+    controle = _controle_du_rapport(id_marche)
     groupes, conclusion = [], None
 
     if controle is not None:
         valeur = str(getattr(controle.conclusion, "value", controle.conclusion)).split(".")[-1].upper()
         conclusion = {"CONFORME": "Procédure conforme", "NON_CONFORME": "Procédure non conforme"}.get(
-    valeur, "Contrôle en cours (conclusion non définitive)")
+            valeur, "Contrôle en cours (conclusion non définitive)")
         # constats confirmés, regroupés par étape
         for e in ControleEtape.query.filter_by(id_controle=controle.id).all():
             lignes = []
             for i in Irregularite.query.filter_by(id_controle_etape=e.id).all():
                 obs = getattr(i, "observation", None) or getattr(i, "observations", None)
+                pieces = noms_pieces(i.id)
+                if pieces:
+                    obs = ((obs + " — ") if obs else "") + "Pièces : " + ", ".join(pieces)
                 lignes.append((i.description, i.texte_applicable, obs))
             # si aucune observation par irrégularité, on met celle de l'étape sur la 1re ligne
             if lignes and not any(l[2] for l in lignes) and e.observations:
@@ -79,6 +95,7 @@ def _donnees_rapport(id_marche):
 
     return marche, groupes, conclusion
 
+
 def _nom_prmp(marche):
     import models
     Prmp = getattr(models, "Prmp", None)
@@ -86,6 +103,20 @@ def _nom_prmp(marche):
         p = Prmp.query.get(marche.id_prmp)
         return p.nom if p else None
     return None
+
+
+def _noms_controleurs(marche):
+    controle = _controle_du_rapport(marche.id)
+    if controle is None:
+        return None
+    ids = {e.id_utilisateur for e in ControleEtape.query.filter_by(id_controle=controle.id).all() if e.id_utilisateur}
+    noms = []
+    for i in sorted(ids):
+        u = db.session.get(Utilisateur, i)
+        if u:
+            noms.append(" ".join(x for x in [u.prenom, u.nom] if x))
+    return ", ".join(noms) or None
+
 
 def _en_tete(marche):
     prmp = _nom_prmp(marche)
@@ -165,7 +196,7 @@ def rapport_marche_pdf(id_marche):
 
 
 # ---------------------------------------------------------------------------
-# Word 
+# Word
 # ---------------------------------------------------------------------------
 def construire_docx(marche, groupes, conclusion):
     from docx import Document
@@ -270,7 +301,7 @@ def rapport_marche_docx(id_marche):
 
 
 # ---------------------------------------------------------------------------
-# Rapport global Word 
+# Rapport global Word
 # ---------------------------------------------------------------------------
 @rapports_bp.route("/global/docx", methods=["GET"])
 def rapport_global_docx():
@@ -288,15 +319,3 @@ def rapport_global_docx():
                                              fin=_date(request.args.get("fin")), region=(request.args.get("region") or "").strip() or None)
     return send_file(fichier, as_attachment=True, download_name=f"Rapport_global_controles_{exercice}.docx",
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
-    def _noms_controleurs(marche):
-        controle = Controle.query.filter_by(id_marche=marche.id).order_by(Controle.id.desc()).first()
-        if controle is None:
-            return None
-        ids = {e.id_utilisateur for e in ControleEtape.query.filter_by(id_controle=controle.id).all() if e.id_utilisateur}
-        noms = []
-        for i in sorted(ids):
-            u = db.session.get(Utilisateur, i)
-            if u:
-                noms.append(" ".join(x for x in [u.prenom, u.nom] if x))
-        return ", ".join(noms) or None
