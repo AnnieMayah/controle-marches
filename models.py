@@ -39,14 +39,13 @@ class Entite(db.Model):
     type = db.Column(db.Enum("STD", "CTD", "EPN", name="type_entite"), nullable=False)
     region = db.Column(db.String(80))
 
-
 class Prmp(db.Model):
     __tablename__ = "prmp"
     id = db.Column(db.Integer, primary_key=True)
     nom = db.Column(db.String(120), nullable=False)
     id_entite = db.Column(db.Integer, db.ForeignKey("entites.id"), nullable=False)
+    email = db.Column(db.String(150))
     entite = db.relationship("Entite")
-
 
 class Utilisateur(db.Model):
     __tablename__ = "utilisateurs"

@@ -1,7 +1,10 @@
 """
 Gestion des PRMP (Personne Responsable des Marchés Publics) : liste, ajout, modification,
-suppression, rattachées à une entité.
+suppression, rattachées à une entité. Chaque PRMP peut avoir une adresse e-mail
+(destinataire du résultat des contrôles).
 """
+import re
+
 from flask import Blueprint, request, jsonify
 from sqlalchemy import func
 
@@ -9,6 +12,10 @@ from extensions import db
 from models import Prmp, Entite, Marche
 
 prmp_bp = Blueprint("prmp", __name__)
+
+
+def _email_valide(valeur):
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", valeur))
 
 
 def nom_prmp_marche(marche):
@@ -32,6 +39,7 @@ def _en_dict(p):
         "nom": p.nom,
         "id_entite": p.id_entite,
         "entite": entite.nom if entite else None,
+        "email": p.email,
         "nb_marches": Marche.query.filter_by(id_prmp=p.id).count(),
     }
 
@@ -57,13 +65,16 @@ def creer_prmp():
     d = request.get_json() or {}
     nom = (d.get("nom") or "").strip()
     id_entite = d.get("id_entite")
+    email = (d.get("email") or "").strip() or None
     if not nom:
         return jsonify({"erreur": "Le nom de la PRMP est obligatoire."}), 400
     if not id_entite or not db.session.get(Entite, id_entite):
         return jsonify({"erreur": "Choisis une entité valide."}), 400
+    if email and not _email_valide(email):
+        return jsonify({"erreur": "L'adresse e-mail n'est pas valide."}), 400
     if Prmp.query.filter(func.lower(Prmp.nom) == nom.lower(), Prmp.id_entite == id_entite).first():
         return jsonify({"erreur": "Cette PRMP existe déjà pour cette entité."}), 409
-    p = Prmp(nom=nom, id_entite=id_entite)
+    p = Prmp(nom=nom, id_entite=id_entite, email=email)
     db.session.add(p)
     db.session.commit()
     return jsonify(_en_dict(p)), 201
@@ -75,17 +86,21 @@ def modifier_prmp(id_prmp):
     d = request.get_json() or {}
     nom = (d.get("nom") or "").strip()
     id_entite = d.get("id_entite", p.id_entite)
+    # si "email" n'est pas envoyé, on garde l'adresse actuelle ; une chaîne vide l'efface
+    email = (d.get("email") or "").strip() or None if "email" in d else p.email
     if not nom:
         return jsonify({"erreur": "Le nom de la PRMP est obligatoire."}), 400
     if not db.session.get(Entite, id_entite):
         return jsonify({"erreur": "Choisis une entité valide."}), 400
+    if email and not _email_valide(email):
+        return jsonify({"erreur": "L'adresse e-mail n'est pas valide."}), 400
     if id_entite != p.id_entite and Marche.query.filter_by(id_prmp=p.id).count():
         return jsonify({"erreur": "Cette PRMP est rattachée à des marchés : on ne peut pas la changer d'entité."}), 409
     doublon = Prmp.query.filter(func.lower(Prmp.nom) == nom.lower(), Prmp.id_entite == id_entite,
                                 Prmp.id != p.id).first()
     if doublon:
         return jsonify({"erreur": "Cette PRMP existe déjà pour cette entité."}), 409
-    p.nom, p.id_entite = nom, id_entite
+    p.nom, p.id_entite, p.email = nom, id_entite, email
     db.session.commit()
     return jsonify(_en_dict(p))
 

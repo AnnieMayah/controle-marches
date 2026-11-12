@@ -7,6 +7,7 @@ from models import Controle, ControleEtape, Etape, Marche
 from services import recalculer_conclusion, valider_controle
 import champs_marche
 from routes.transferts import _niveau_actuel as niveau_actuel
+from routes.notifications_prmp import envoyer_resultat_controle
 controles_bp = Blueprint("controles", __name__)
 
 
@@ -103,7 +104,16 @@ def valider(id_controle):
 
     data = request.get_json()
     controle = valider_controle(id_controle, data["id_utilisateur_validateur"])
-    return jsonify(_controle_resume(controle))
+
+    
+    try:
+        notification, _ = envoyer_resultat_controle(controle)
+    except Exception as e:
+        notification = {"ok": False, "erreur": str(e)}
+
+    resume = _controle_resume(controle)
+    resume["notification"] = notification
+    return jsonify(resume)
 
 
 def _controle_resume(c):
