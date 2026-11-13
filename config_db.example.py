@@ -1,0 +1,1 @@
+DATABASE_URI = "postgresql+psycopg2://postgres:2112@localhost:5432/controle_marches_publics"
