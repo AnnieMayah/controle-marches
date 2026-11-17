@@ -16,6 +16,7 @@ DUREE_JETON_S = 8 * 3600  # 8 heures
 ROUTES_PUBLIQUES = {
     "/api/auth/login", "/api/auth/inscription", "/api/auth/inscription/verifier",
     "/api/auth/code/renvoyer", "/api/auth/mot-de-passe-oublie", "/api/auth/reinitialiser",
+    "/api/auth/reinitialiser/verifier",
 }
 
 

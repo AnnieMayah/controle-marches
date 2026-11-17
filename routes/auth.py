@@ -189,15 +189,16 @@ def renvoyer_code():
             return _erreur_envoi(e)
         return jsonify(reponse)
 
-    # réinitialisation : réponse identique que le compte existe ou non
+       # réinitialisation
     utilisateur = _par_email(email)
-    if utilisateur and utilisateur.actif:
-        if attente:
-            return jsonify({"erreur": f"Patiente {attente} s avant de demander un nouveau code."}), 429
-        try:
-            _emettre_code(email, objet)
-        except mailer.ErreurEnvoi as e:
-            return _erreur_envoi(e)
+    if not utilisateur or not utilisateur.actif:
+        return jsonify({"erreur": "Aucun compte n'est associé à cette adresse e-mail."}), 404
+    if attente:
+        return jsonify({"erreur": f"Patiente {attente} s avant de demander un nouveau code."}), 429
+    try:
+        _emettre_code(email, objet)
+    except mailer.ErreurEnvoi as e:
+        return _erreur_envoi(e)
     return jsonify(reponse)
 
 
@@ -206,17 +207,30 @@ def renvoyer_code():
 def mot_de_passe_oublie():
     email = ((request.get_json() or {}).get("email") or "").strip().lower()
     if not EMAIL_RE.match(email):
-        return jsonify({"erreur": "Adresse e-mail invalide."}), 400
+        return jsonify({"erreur": "Saisis une adresse e-mail valide."}), 400
 
     utilisateur = _par_email(email)
-    if utilisateur and utilisateur.actif and not _attente_restante(email, "REINITIALISATION"):
+    if not utilisateur or not utilisateur.actif:
+        return jsonify({"erreur": "Aucun compte n'est associé à cette adresse e-mail."}), 404
+
+    if not _attente_restante(email, "REINITIALISATION"):
         try:
             _emettre_code(email, "REINITIALISATION")
         except mailer.ErreurEnvoi as e:
             return _erreur_envoi(e)
-    # réponse volontairement identique si l'adresse n'existe pas (pas de fuite d'information)
     return jsonify({"ok": True, "email": email, "mode_dev": not mailer.smtp_configure()})
 
+@auth_bp.route("/reinitialiser/verifier", methods=["POST"])
+def verifier_code_reinitialisation():
+    d = request.get_json() or {}
+    email = (d.get("email") or "").strip().lower()
+    enreg, erreur = _verifier_code(email, "REINITIALISATION", d.get("code"))
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
+    utilisateur = _par_email(email)
+    if not utilisateur or not utilisateur.actif:
+        return jsonify({"erreur": "Compte introuvable ou désactivé."}), 400
+    return jsonify({"ok": True})
 
 @auth_bp.route("/reinitialiser", methods=["POST"])
 def reinitialiser():
