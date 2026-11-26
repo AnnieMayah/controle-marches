@@ -9,6 +9,11 @@ from services import recalculer_conclusion
 irregularites_bp = Blueprint("irregularites", __name__)
 
 
+def _propre(valeur):
+    """Texte nettoyé, ou None s'il est vide."""
+    return (valeur or "").strip() or None
+
+
 @irregularites_bp.route("/etape/<int:id_controle_etape>", methods=["GET"])
 def lister_irregularites_etape(id_controle_etape):
     irregularites = Irregularite.query.filter_by(id_controle_etape=id_controle_etape).all()
@@ -36,6 +41,10 @@ def ajouter_irregularite():
         return jsonify({"erreur": "La description de l'irrégularité est obligatoire."}), 400
     irregularite = Irregularite(
         id_controle_etape=data["id_controle_etape"],
+        irregularite=_propre(data.get("irregularite")),
+        observation=_propre(data.get("observation")),
+        observations_generales=_propre(data.get("observations_generales")),
+        description_risque=_propre(data.get("description_risque")),
         description=data["description"],
         texte_applicable=data.get("texte_applicable"),
         risque=data.get("risque"),
@@ -61,10 +70,14 @@ def modifier_irregularite(id_irregularite):
     description = (d.get("description") or "").strip()
     if not description:
         return jsonify({"erreur": "La description du constat est obligatoire."}), 400
+    irr.irregularite = _propre(d.get("irregularite"))
+    irr.observation = _propre(d.get("observation"))
+    irr.observations_generales = _propre(d.get("observations_generales"))
+    irr.description_risque = _propre(d.get("description_risque"))
     irr.description = description
-    irr.texte_applicable = (d.get("texte_applicable") or "").strip() or None
+    irr.texte_applicable = _propre(d.get("texte_applicable"))
     irr.risque = d.get("risque") or irr.risque
-    irr.recommandation = (d.get("recommandation") or "").strip() or None
+    irr.recommandation = _propre(d.get("recommandation"))
     db.session.commit()
     return jsonify({"id": irr.id})
 
@@ -84,7 +97,12 @@ def supprimer_irregularite(id_irregularite):
 
 def _irregularite_en_dict(i):
     return {
-        "id": i.id, "id_controle_etape": i.id_controle_etape, "description": i.description,
+        "id": i.id, "id_controle_etape": i.id_controle_etape,
+        "irregularite": i.irregularite,
+        "observation": i.observation,
+        "observations_generales": i.observations_generales,
+        "description_risque": i.description_risque,
+        "description": i.description,
         "texte_applicable": i.texte_applicable, "risque": i.risque,
         "recommandation": i.recommandation, "impacte_attribution": i.impacte_attribution,
     }

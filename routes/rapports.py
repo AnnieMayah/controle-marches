@@ -2,21 +2,21 @@
 Génération du rapport de contrôle (PDF ou Word) pour un marché donné, au format
 « Liste des irrégularités et anomalies constatées et les procédures applicables »,
 et du rapport global Word.
+
+Le rapport ne liste que les irrégularités des constats (champ « Irrégularité »), avec l'article applicable.
+La colonne « Observations » reste vide : elle est complétée par la PRMP.
 """
-from datetime import date, datetime
-from flask import Blueprint, send_file, request, jsonify, abort
+from datetime import datetime
+from flask import Blueprint, send_file, request, abort, jsonify
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from xml.sax.saxutils import escape
 import io
-from services import detecter_anomalies
-from anomalies_detaillees import detecter_detaille
 from securite import peut_voir_entite
-from routes.preuves import noms_pieces
 from models import Marche, Controle, ControleEtape, Irregularite
 from routes.objets import compte_marche
 from extensions import db
@@ -30,21 +30,6 @@ EN_TETES = ["Irrégularités et Anomalies constatées", "Procédures applicables
 # ---------------------------------------------------------------------------
 # Données communes au PDF et au Word
 # ---------------------------------------------------------------------------
-
-def _anomalies_detectees(marche):
-    return detecter_detaille(marche)
-
-
-def _normaliser(item):
-    """Accepte une chaîne, un dict ou un objet : renvoie (étape, description, texte applicable)."""
-    if isinstance(item, str):
-        return None, item, None
-    get = item.get if isinstance(item, dict) else (lambda k, d=None: getattr(item, k, d))
-    etape = get("etape")
-    etape = getattr(etape, "libelle", etape)
-    return etape, get("description") or get("message") or str(item), get("texte_applicable")
-
-
 def _controle_du_rapport(id_marche):
     """Contrôle validé le plus récent s'il existe, sinon le dernier contrôle."""
     base = Controle.query.filter_by(id_marche=id_marche)
@@ -54,7 +39,9 @@ def _controle_du_rapport(id_marche):
 
 def _donnees_rapport(id_marche):
     """Retourne (marche, groupes, conclusion).
-    groupes : [(titre_étape, [(description, texte_applicable, observation), ...]), ...]
+    groupes : [(titre_étape, [(irrégularité, article applicable, None), ...]), ...]
+    Seules les irrégularités des constats sont listées. La colonne « Observations » reste vide :
+    elle est complétée par la PRMP.
     conclusion : « Procédure conforme » / « Procédure non conforme » / None (pas de contrôle)."""
     marche = Marche.query.get_or_404(id_marche)
     if not peut_voir_entite(marche.id_entite):
@@ -66,32 +53,12 @@ def _donnees_rapport(id_marche):
         valeur = str(getattr(controle.conclusion, "value", controle.conclusion)).split(".")[-1].upper()
         conclusion = {"CONFORME": "Procédure conforme", "NON_CONFORME": "Procédure non conforme"}.get(
             valeur, "Contrôle en cours (conclusion non définitive)")
-        # constats confirmés, regroupés par étape
-        for e in ControleEtape.query.filter_by(id_controle=controle.id).all():
-            lignes = []
-            for i in Irregularite.query.filter_by(id_controle_etape=e.id).all():
-                obs = getattr(i, "observation", None) or getattr(i, "observations", None)
-                pieces = noms_pieces(i.id)
-                if pieces:
-                    obs = ((obs + " — ") if obs else "") + "Pièces : " + ", ".join(pieces)
-                lignes.append((i.description, i.texte_applicable, obs))
-            # si aucune observation par irrégularité, on met celle de l'étape sur la 1re ligne
-            if lignes and not any(l[2] for l in lignes) and e.observations:
-                d, t, _ = lignes[0]
-                lignes[0] = (d, t, e.observations)
+        etapes = sorted(ControleEtape.query.filter_by(id_controle=controle.id).all(), key=lambda e: e.etape.ordre)
+        for e in etapes:
+            irregularites = Irregularite.query.filter_by(id_controle_etape=e.id).order_by(Irregularite.id).all()
+            lignes = [(i.irregularite or i.description, i.texte_applicable, None) for i in irregularites]
             if lignes:
                 groupes.append((e.etape.libelle, lignes))
-
-        # anomalies détectées automatiquement mais non confirmées
-        confirmees = {l[0] for _, lignes in groupes for l in lignes}
-        par_etape = {}
-        for item in _anomalies_detectees(marche):
-            etape, description, texte = _normaliser(item)
-            par_etape.setdefault(etape or "Anomalies détectées automatiquement", []).append((description, texte, None))
-        for titre, lignes in par_etape.items():
-            lignes = [l for l in lignes if l[0] not in confirmees]
-            if lignes:
-                groupes.append((titre, lignes))
 
     return marche, groupes, conclusion
 
@@ -130,6 +97,10 @@ def _en_tete(marche):
     ], marche.annee_exercice, compte_marche(marche)
 
 
+def _nom_fichier(marche):
+    return marche.reference or f"marche_{marche.id}"
+
+
 # ---------------------------------------------------------------------------
 # PDF
 # ---------------------------------------------------------------------------
@@ -143,8 +114,8 @@ S_HEAD = ParagraphStyle("h", fontName=FB, fontSize=10, leading=13, alignment=TA_
 S_CONCL = ParagraphStyle("k", fontName=FB, fontSize=12, leading=16, spaceBefore=14)
 
 
-def _p(texte, style):
-    return Paragraph(escape(str(texte or "—")).replace("\n", "<br/>"), style)
+def _p(texte, style, vide="—"):
+    return Paragraph(escape(str(texte or vide)).replace("\n", "<br/>"), style)
 
 
 def _info(label, valeur):
@@ -173,11 +144,12 @@ def construire_pdf(marche, groupes, conclusion):
         r = len(data)
         data.append([Paragraph(f"<u>{escape(titre)}</u>", S_ETAPE), "", ""])
         style.append(("SPAN", (0, r), (2, r)))
-        for description, texte, observation in lignes:
-            data.append([_p("- " + str(description), S_G), _p(texte, S_J), _p(observation, S_J)])
+        for irregularite, article, observation in lignes:
+            # 3e colonne laissée vide : elle est complétée par la PRMP
+            data.append([_p("- " + str(irregularite), S_G), _p(article, S_J), _p(observation, S_J, "")])
 
     if len(data) == 1:
-        data.append([_p("Aucune irrégularité ni anomalie constatée.", S_G), _p("—", S_J), _p("—", S_J)])
+        data.append([_p("Aucune irrégularité constatée.", S_G), _p("—", S_J), _p("", S_J, "")])
 
     elements.append(Table(data, colWidths=[70 * mm, 65 * mm, 45 * mm], repeatRows=1, style=TableStyle(style)))
     if conclusion:
@@ -192,7 +164,7 @@ def rapport_marche_pdf(id_marche):
     marche, groupes, conclusion = _donnees_rapport(id_marche)
     buffer = construire_pdf(marche, groupes, conclusion)
     return send_file(buffer, mimetype="application/pdf", as_attachment=True,
-                     download_name=f"rapport_{marche.reference}.pdf")
+                     download_name=f"rapport_{_nom_fichier(marche)}.pdf")
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +218,11 @@ def construire_docx(marche, groupes, conclusion):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     largeurs = [Mm(70), Mm(65), Mm(45)]
 
-    def remplir(cell, texte, align=WD_ALIGN_PARAGRAPH.LEFT, bold=False, underline=False, size=9.5):
+    def remplir(cell, texte, align=WD_ALIGN_PARAGRAPH.LEFT, bold=False, underline=False, size=9.5, vide="—"):
         cell.text = ""
         par = cell.paragraphs[0]
         par.alignment = align
-        run(par, str(texte or "—"), bold=bold, underline=underline, size=size)
+        run(par, str(texte or vide), bold=bold, underline=underline, size=size)
 
     for i, titre in enumerate(EN_TETES):
         remplir(table.rows[0].cells[i], titre, WD_ALIGN_PARAGRAPH.CENTER, bold=True, size=10)
@@ -264,17 +236,17 @@ def construire_docx(marche, groupes, conclusion):
         row = table.add_row()
         fusion = row.cells[0].merge(row.cells[2])
         remplir(fusion, titre, WD_ALIGN_PARAGRAPH.CENTER, bold=True, underline=True, size=10.5)
-        for description, texte, observation in lignes:
+        for irregularite, article, observation in lignes:
             row = table.add_row()
-            remplir(row.cells[0], "- " + str(description))
-            remplir(row.cells[1], texte, WD_ALIGN_PARAGRAPH.JUSTIFY)
-            remplir(row.cells[2], observation, WD_ALIGN_PARAGRAPH.JUSTIFY)
+            remplir(row.cells[0], "- " + str(irregularite))
+            remplir(row.cells[1], article, WD_ALIGN_PARAGRAPH.JUSTIFY)
+            remplir(row.cells[2], observation, WD_ALIGN_PARAGRAPH.JUSTIFY, vide="")  # complétée par la PRMP
 
     if not groupes:
         row = table.add_row()
-        remplir(row.cells[0], "Aucune irrégularité ni anomalie constatée.")
+        remplir(row.cells[0], "Aucune irrégularité constatée.")
         remplir(row.cells[1], "—")
-        remplir(row.cells[2], "—")
+        remplir(row.cells[2], "", vide="")
 
     for row in table.rows:
         for cell, largeur in zip(row.cells, largeurs):
@@ -296,8 +268,62 @@ def construire_docx(marche, groupes, conclusion):
 def rapport_marche_docx(id_marche):
     marche, groupes, conclusion = _donnees_rapport(id_marche)
     buffer = construire_docx(marche, groupes, conclusion)
-    return send_file(buffer, as_attachment=True, download_name=f"rapport_{marche.reference}.docx",
+    return send_file(buffer, as_attachment=True, download_name=f"rapport_{_nom_fichier(marche)}.docx",
                      mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+
+# ---------------------------------------------------------------------------
+# Fiche d'exploitation Excel + historique des fiches transmises dans le circuit
+# ---------------------------------------------------------------------------
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@rapports_bp.route("/marche/<int:id_marche>/excel", methods=["GET"])
+def rapport_marche_excel(id_marche):
+    """Fiche d'exploitation Excel du contrôle du marché (même format que le modèle de la CRM)."""
+    marche = Marche.query.get_or_404(id_marche)
+    if not peut_voir_entite(marche.id_entite):
+        abort(403)
+    controle = _controle_du_rapport(id_marche)
+    if controle is None:
+        abort(404, "Aucun contrôle pour ce marché.")
+    import fiche_excel
+    buffer = fiche_excel.construire_fiche_excel([controle])
+    return send_file(buffer, as_attachment=True, mimetype=XLSX,
+                     download_name=f"fiche_exploitation_{_nom_fichier(marche)}.xlsx")
+
+
+@rapports_bp.route("/controle/<int:id_controle>/fiches", methods=["GET"])
+def fiches_controle(id_controle):
+    """Historique des fiches Excel envoyées lors des transferts du circuit (plus récentes d'abord)."""
+    from models import FicheExcel
+    controle = Controle.query.get_or_404(id_controle)
+    if not peut_voir_entite(controle.marche.id_entite):
+        abort(403)
+
+    def nom(uid):
+        u = db.session.get(Utilisateur, uid) if uid else None
+        return " ".join(x for x in [u.prenom, u.nom] if x) if u else None
+
+    fiches = FicheExcel.query.filter_by(id_controle=id_controle).order_by(FicheExcel.id.desc()).all()
+    return jsonify([{
+        "id": f.id, "nom_fichier": f.nom_fichier, "taille_ko": f.taille_ko,
+        "niveau_origine": f.niveau_origine, "niveau_destination": f.niveau_destination,
+        "expediteur": nom(f.id_expediteur), "destinataire": nom(f.id_destinataire),
+        "date_creation": f.date_creation.isoformat() if f.date_creation else None,
+    } for f in fiches])
+
+
+@rapports_bp.route("/fiches/<int:id_fiche>/telecharger", methods=["GET"])
+def telecharger_fiche(id_fiche):
+    from models import FicheExcel
+    import os
+    f = FicheExcel.query.get_or_404(id_fiche)
+    if not peut_voir_entite(Controle.query.get_or_404(f.id_controle).marche.id_entite):
+        abort(403)
+    if not os.path.exists(f.chemin_fichier):
+        abort(404, "Fichier introuvable sur le serveur.")
+    return send_file(f.chemin_fichier, as_attachment=True, download_name=f.nom_fichier, mimetype=XLSX)
 
 
 # ---------------------------------------------------------------------------

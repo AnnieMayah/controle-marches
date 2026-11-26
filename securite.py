@@ -21,10 +21,13 @@ ROUTES_PUBLIQUES = {
 
 
 # Droits par rôle, identiques à ceux de utils/permissions.js (côté interface).
-ROLES_DONNEES = ["ADMIN", "COLLECTE"]                      # entités, marchés, PRMP
-ROLES_DOCUMENTS = ["ADMIN", "COLLECTE", "VERIFICATION"]    # pièces justificatives
-ROLES_NOTER = ["ADMIN", "ANALYSE"]                         # contrôles, notes, constats, recommandations
-ROLES_VALIDER = ["ADMIN", "PCNM", "VALIDATION"]            # validation finale d'un contrôle
+ROLES_DONNEES = ["ADMIN", "COLLECTE"]                      # entités, marchés, PRMP (création / suppression)
+ROLES_ENTITES_PRMP = ROLES_DONNEES + ["CHEF_SERVICE", "CV"]  # ajouter / modifier / supprimer une entité et une PRMP : CC, membre et CV
+ROLES_MODIF_MARCHE = ROLES_DONNEES + ["CV"]                # modification des informations d'un marché
+ROLES_DOCUMENTS = ["ADMIN", "COLLECTE", "VERIFICATION", "CHEF_SERVICE", "CV"]   # pièces justificatives
+ROLES_NOTER = ["ADMIN", "ANALYSE"]                         # recommandations
+ROLES_CONTROLER = ["ADMIN", "ANALYSE", "CHEF_SERVICE", "CV"]  # ouvrir un contrôle, noter, constats, preuves
+ROLES_VALIDER = ["ADMIN"]                                  # validation finale d'un contrôle : CC / administrateur seulement
 METHODES_ECRITURE = {"POST", "PUT", "PATCH", "DELETE"}
 
 
@@ -34,11 +37,14 @@ def _roles_exiges(chemin, methode):
     if methode not in METHODES_ECRITURE:
         return None
     if chemin.startswith("/api/controles"):
-        return ROLES_VALIDER if "valid" in chemin else ROLES_NOTER
+        return ROLES_VALIDER if "valid" in chemin else ROLES_CONTROLER
+    # un CV peut modifier (PUT) les informations d'un marché, pas le créer ni le supprimer
+    if methode == "PUT" and chemin.startswith("/api/marches/"):
+        return ROLES_MODIF_MARCHE
     regles = {
-        "/api/marches": ROLES_DONNEES, "/api/entites": ROLES_DONNEES, "/api/prmp": ROLES_DONNEES,
+        "/api/marches": ROLES_DONNEES, "/api/entites": ROLES_ENTITES_PRMP, "/api/prmp": ROLES_ENTITES_PRMP,
         "/api/documents": ROLES_DOCUMENTS,
-        "/api/irregularites": ROLES_NOTER, "/api/recommandations": ROLES_NOTER, "/api/preuves": ROLES_NOTER,
+        "/api/irregularites": ROLES_CONTROLER, "/api/recommandations": ROLES_NOTER, "/api/preuves": ROLES_CONTROLER,
     }
     for prefixe, roles in regles.items():
         if chemin == prefixe or chemin.startswith(prefixe + "/"):
@@ -81,6 +87,8 @@ def _authentifier():
 def connexion_requise(f):
     @wraps(f)
     def enveloppe(*args, **kwargs):
+        if request.method == "OPTIONS":
+            return "", 200
         utilisateur, erreur = _authentifier()
         if erreur:
             return erreur

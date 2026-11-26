@@ -39,6 +39,7 @@ class Entite(db.Model):
     type = db.Column(db.Enum("STD", "CTD", "EPN", name="type_entite"), nullable=False)
     region = db.Column(db.String(80))
 
+
 class Prmp(db.Model):
     __tablename__ = "prmp"
     id = db.Column(db.Integer, primary_key=True)
@@ -46,6 +47,14 @@ class Prmp(db.Model):
     id_entite = db.Column(db.Integer, db.ForeignKey("entites.id"), nullable=False)
     email = db.Column(db.String(150))
     entite = db.relationship("Entite")
+
+
+class Service(db.Model):
+    """Services de la Direction (Service A, B, C). Chaque service a un membre (chef de service) et un CV."""
+    __tablename__ = "services"
+    id = db.Column(db.Integer, primary_key=True)
+    nom = db.Column(db.String(50), nullable=False, unique=True)
+
 
 class Utilisateur(db.Model):
     __tablename__ = "utilisateurs"
@@ -55,29 +64,34 @@ class Utilisateur(db.Model):
     email = db.Column(db.String(150), unique=True)
     login = db.Column(db.String(60), nullable=False, unique=True)
     mot_de_passe_hash = db.Column(db.String(255), nullable=False)
+    # ADMIN = CC / directeur / administrateur ; CHEF_SERVICE = membre A, B ou C (chef de service) ;
+    # CV = contrôleur vérificateur
     role = db.Column(db.Enum("ADMIN", "COLLECTE", "VERIFICATION", "ANALYSE", "VALIDATION", "PCNM", "ENTITE", "INVITE",
-                             name="role_utilisateur"), nullable=False)
+                             "CHEF_SERVICE", "CV", name="role_utilisateur"), nullable=False)
     id_entite = db.Column(db.Integer, db.ForeignKey("entites.id"), nullable=True)
+    id_service = db.Column(db.Integer, db.ForeignKey("services.id"), nullable=True)
     actif = db.Column(db.Boolean, nullable=False, default=True)
     date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
 
 class Marche(db.Model):
+    """Le CC crée le marché avec l'objet (donc le compte) et l'entité ; le CV remplit ensuite la référence,
+    la nature, le mode de passation, le montant et l'année (colonnes donc facultatives en base)."""
     __tablename__ = "marches"
     id = db.Column(db.Integer, primary_key=True)
-    reference = db.Column(db.String(60), nullable=False, unique=True)
+    reference = db.Column(db.String(60), nullable=True, unique=True)
     objet = db.Column(db.Text, nullable=False)
     id_entite = db.Column(db.Integer, db.ForeignKey("entites.id"), nullable=False)
     id_prmp = db.Column(db.Integer, db.ForeignKey("prmp.id"), nullable=True)
-    id_nature = db.Column(db.Integer, db.ForeignKey("natures_marche.id"), nullable=False)
-    id_mode_passation = db.Column(db.Integer, db.ForeignKey("modes_passation.id"), nullable=False)
+    id_nature = db.Column(db.Integer, db.ForeignKey("natures_marche.id"), nullable=True)
+    id_mode_passation = db.Column(db.Integer, db.ForeignKey("modes_passation.id"), nullable=True)
     id_objet = db.Column(db.Integer, db.ForeignKey("objets_marche.id"))
-    montant = db.Column(db.Numeric(16, 2), nullable=False)
+    montant = db.Column(db.Numeric(16, 2), nullable=True)
     titulaire = db.Column(db.String(150))
     date_signature = db.Column(db.Date)
     date_approbation = db.Column(db.Date)
     date_notification = db.Column(db.Date)
-    annee_exercice = db.Column(db.SmallInteger, nullable=False)
+    annee_exercice = db.Column(db.SmallInteger, nullable=True)
     hors_ppm = db.Column(db.Boolean, nullable=False, default=False)
     marche_regularisation = db.Column(db.Boolean, nullable=False, default=False)
     id_utilisateur_saisie = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"), nullable=True)
@@ -91,12 +105,14 @@ class Marche(db.Model):
     forme_prix = db.Column(db.String(20))
     delai_execution = db.Column(db.String(60))
     financement = db.Column(db.String(100))
+    # circuit d'envoi : A_CONTROLER -> A_ENVOYER -> ENVOYE
+    statut_controle = db.Column(db.String(20), nullable=False, default="A_CONTROLER")
 
     entite = db.relationship("Entite", backref="marches")
     prmp = db.relationship("Prmp")
     nature = db.relationship("NatureMarche")
     mode_passation = db.relationship("ModePassation")
-     
+
 
 class Controle(db.Model):
     __tablename__ = "controles"
@@ -108,6 +124,10 @@ class Controle(db.Model):
                            nullable=False, default="EN_COURS")
     id_utilisateur_validateur = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"), nullable=True)
     date_validation = db.Column(db.DateTime, nullable=True)
+    # envoi : service destinataire (chef de service) puis CV assigné
+    id_service = db.Column(db.Integer, db.ForeignKey("services.id"), nullable=True)
+    id_utilisateur_assigne = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"), nullable=True)
+    date_envoi = db.Column(db.DateTime, nullable=True)
 
     marche = db.relationship("Marche")
 
@@ -131,9 +151,13 @@ class Irregularite(db.Model):
     __tablename__ = "irregularites"
     id = db.Column(db.Integer, primary_key=True)
     id_controle_etape = db.Column(db.Integer, db.ForeignKey("controle_etapes.id"), nullable=False)
+    irregularite = db.Column(db.Text)
     description = db.Column(db.Text, nullable=False)
     texte_applicable = db.Column(db.Text)
     risque = db.Column(db.String(255))
+    observation = db.Column(db.Text)
+    observations_generales = db.Column(db.Text)
+    description_risque = db.Column(db.Text)
     recommandation = db.Column(db.Text)
     impacte_attribution = db.Column(db.Boolean, nullable=False, default=False)
 
@@ -177,8 +201,31 @@ class CodeVerification(db.Model):
     utilise = db.Column(db.Boolean, nullable=False, default=False)
     date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
 
+
 class ObjetMarche(db.Model):
     __tablename__ = "objets_marche"
     id = db.Column(db.Integer, primary_key=True)
     compte = db.Column(db.String(10), nullable=False)
     libelle = db.Column(db.Text, nullable=False, unique=True)
+
+
+class ObservationType(db.Model):
+    __tablename__ = "observation_type"
+    id = db.Column(db.Integer, primary_key=True)
+    id_etape = db.Column(db.Integer, db.ForeignKey("etapes.id"), nullable=False)
+    libelle = db.Column(db.String(255), nullable=False)
+    __table_args__ = (db.UniqueConstraint("id_etape", "libelle"),)
+
+class FicheExcel(db.Model):
+    __tablename__ = "fiches_excel"
+    id = db.Column(db.Integer, primary_key=True)
+    id_controle = db.Column(db.Integer, db.ForeignKey("controles.id"), nullable=False)
+    id_transfert = db.Column(db.Integer)
+    niveau_origine = db.Column(db.String(20))
+    niveau_destination = db.Column(db.String(20))
+    id_expediteur = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"))
+    id_destinataire = db.Column(db.Integer, db.ForeignKey("utilisateurs.id"))
+    nom_fichier = db.Column(db.String(255), nullable=False)
+    chemin_fichier = db.Column(db.String(500), nullable=False)
+    taille_ko = db.Column(db.Integer)
+    date_creation = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)

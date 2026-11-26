@@ -1,526 +1,721 @@
 """
-Rapport global de mission (Word) : reprend la structure du rapport de contrôle a posteriori de la CRM
-(couverture, introduction, méthodologie, données générales, résultats, recommandations, conclusion, annexes)
-à partir des contrôles VALIDÉS enregistrés dans l'application.
-
-Les passages qui demandent un jugement humain sont marqués « [À compléter] » (surlignés en jaune).
+Rapport global de mission de contrôle a posteriori (Word), au format du rapport de la CRM.
+generer(annee, debut, fin, region) -> (BytesIO, exercice)
 """
 import io
-from collections import defaultdict, Counter
+from collections import OrderedDict, defaultdict
 from datetime import date
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_COLOR_INDEX
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_BREAK
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Pt, Cm, RGBColor
+from docx.shared import Pt, Mm, Cm
 
-from models import (Controle, ControleEtape, Irregularite, Entite, Recommandation, Utilisateur,
-                    Document as PieceJointe, Etape, NatureMarche, ModePassation)
+from extensions import db
+from models import (Controle, ControleEtape, Irregularite, Marche,
+                    Recommandation, Utilisateur)
 
-# En-tête de la page de couverture (modifiable)
-ORGANISME = ["MINISTÈRE DE L'ÉCONOMIE ET DES FINANCES", "COMMISSION NATIONALE DES MARCHÉS", "COMMISSION RÉGIONALE DES MARCHÉS"]
-VERT = RGBColor(0x1B, 0x43, 0x32)
-COULEURS = ["#2F5BEA", "#12A36B", "#F5A524", "#7C4DEB", "#8C9BC4", "#E5484D"]
-MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
-ROLES = {"ADMIN": "Administrateur", "COLLECTE": "Assistant contrôleur", "VERIFICATION": "Contrôleur vérificateur",
-         "ANALYSE": "Membre de la Commission", "VALIDATION": "Validateur", "PCNM": "PCNM"}
-ABREV_MODES = {"Appel d'offres ouvert": "AOO", "Appel d'offres restreint": "AOR", "Affichage / Consultation": "Affichage",
-               "Gré à gré": "MGG", "Achat direct": "Achat direct", "Appel à manifestation d'intérêt": "AMI"}
+A_COMPLETER = "[À compléter]"
+MOIS = ["Janvier", "Février", "Mars", "Avril", "Mai", "Juin", "Juillet", "Août",
+        "Septembre", "Octobre", "Novembre", "Décembre"]
+NOMBRES = {0: "ZÉRO", 1: "UN", 2: "DEUX", 3: "TROIS", 4: "QUATRE", 5: "CINQ",
+           6: "SIX", 7: "SEPT", 8: "HUIT", 9: "NEUF", 10: "DIX"}
 
 
-# ------------------------------------------------------------------ utilitaires de texte
-def en_lettres(n):
-    """Nombre en lettres (0–999), ex. 35 -> « trente-cinq »."""
-    u = ["zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix", "onze", "douze", "treize",
-         "quatorze", "quinze", "seize", "dix-sept", "dix-huit", "dix-neuf"]
-    d = ["", "", "vingt", "trente", "quarante", "cinquante", "soixante"]
-    if n < 20:
-        return u[n]
-    if n < 70:
-        dizaine, reste = divmod(n, 10)
-        return d[dizaine] + (" et un" if reste == 1 else ("-" + u[reste] if reste else ""))
-    if n < 80:
-        return "soixante" + (" et " if n == 71 else "-") + u[n - 60]
-    if n < 100:
-        return "quatre-vingt" + ("s" if n == 80 else "-" + u[n - 80])
-    centaine, reste = divmod(n, 100)
-    tete = "cent" if centaine == 1 else u[centaine] + " cent"
-    return tete + ("s" if centaine > 1 and reste == 0 else "") + (" " + en_lettres(reste) if reste else "")
+# ------------------------------------------------------------------ utilitaires
+def _val(x):
+    return str(getattr(x, "value", x)).split(".")[-1].upper()
 
 
-def nombre(n):
-    return f"{en_lettres(n)} ({n:02d})" if n < 10 else f"{en_lettres(n)} ({n})"
+def _montant(v):
+    v = float(v or 0)
+    s = f"{v:,.2f}".replace(",", " ").replace(".", ",")
+    return s[:-3] if s.endswith(",00") else s
 
 
-def ar(v):
-    return f"{v:,.0f}".replace(",", " ")
+def _nb(n):
+    return f"{n:02d}"
 
 
-def pct(a, b):
-    return round(a / b * 100, 2) if b else 0.0
+def _lettres(n):
+    return f"{NOMBRES.get(n, str(n))} ({_nb(n)})"
 
 
-def mois_annee(d):
-    return f"{MOIS[d.month - 1].capitalize()} {d.year}"
+def _taux(a, b):
+    return (f"{(100 * a / b):.2f}".replace(".", ",") + " %") if b else "0 %"
 
 
-# ------------------------------------------------------------------ utilitaires Word
-def griser(cellule, couleur):
-    tcPr = cellule._tc.get_or_add_tcPr()
+def _champ(par, instr, texte=""):
+    """Insère un champ Word (TOC, SEQ, PAGE...) mis à jour à l'ouverture."""
+    def fc(t):
+        r = par.add_run()
+        e = OxmlElement("w:fldChar")
+        e.set(qn("w:fldCharType"), t)
+        if t == "begin":
+            e.set(qn("w:dirty"), "true")
+        r._r.append(e)
+    fc("begin")
+    r = par.add_run()
+    it = OxmlElement("w:instrText")
+    it.set(qn("xml:space"), "preserve")
+    it.text = " " + instr + " "
+    r._r.append(it)
+    fc("separate")
+    par.add_run(texte)
+    fc("end")
+
+
+def _ecrire(par, texte, bold=False, italic=False, underline=False, size=None):
+    """Ajoute du texte ; '[À compléter]' est surligné en jaune."""
+    morceaux = str(texte).split(A_COMPLETER)
+    for i, m in enumerate(morceaux):
+        if m:
+            r = par.add_run(m)
+            r.bold, r.italic, r.underline = bold, italic, underline
+            if size:
+                r.font.size = Pt(size)
+        if i < len(morceaux) - 1:
+            r = par.add_run(A_COMPLETER)
+            r.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            r.bold = bold
+            if size:
+                r.font.size = Pt(size)
+
+
+def _para(doc, texte="", align=WD_ALIGN_PARAGRAPH.JUSTIFY, **kw):
+    p = doc.add_paragraph()
+    p.alignment = align
+    p.paragraph_format.space_after = Pt(6)
+    if texte:
+        _ecrire(p, texte, **kw)
+    return p
+
+
+def _puces(doc, items):
+    for it in items:
+        p = doc.add_paragraph(style="List Bullet")
+        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        _ecrire(p, it)
+
+
+def _titre(doc, texte, niveau=1):
+    h = doc.add_heading(level=niveau)
+    r = h.add_run(texte)
+    r.font.name = "Times New Roman"
+    r.bold = True
+    r.font.size = Pt({1: 14, 2: 13, 3: 12}[niveau])
+    return h
+
+
+def _legende(doc, genre, texte):
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(genre + " ")
+    r.bold = r.italic = True
+    _champ(p, "SEQ " + genre + " \\* ARABIC", "1")
+    r = p.add_run(" " + texte)
+    r.bold = r.italic = True
+    return p
+
+
+def _saut_page(doc):
+    doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
+
+
+def _ombrer(cell, couleur="D9D9D9"):
+    tcPr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
-    shd.set(qn("w:val"), "clear"); shd.set(qn("w:color"), "auto"); shd.set(qn("w:fill"), couleur)
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), couleur)
     tcPr.append(shd)
 
 
-def bordure_paragraphe(paragraphe, couleur="70AD47", epaisseur=18):
-    pPr = paragraphe._p.get_or_add_pPr()
-    bordures = OxmlElement("w:pBdr")
-    for cote in ("top", "left", "bottom", "right"):
-        b = OxmlElement(f"w:{cote}")
-        b.set(qn("w:val"), "single"); b.set(qn("w:sz"), str(epaisseur)); b.set(qn("w:space"), "10"); b.set(qn("w:color"), couleur)
-        bordures.append(b)
-    pPr.append(bordures)
+def _cell(cell, texte, bold=False, align=WD_ALIGN_PARAGRAPH.LEFT, size=10, underline=False):
+    cell.text = ""
+    p = cell.paragraphs[0]
+    p.alignment = align
+    _ecrire(p, texte, bold=bold, size=size, underline=underline)
 
 
-def champ(paragraphe, instruction, texte_provisoire=""):
-    """Insère un champ Word (table des matières, numéro de page)."""
-    run = paragraphe.add_run()
-    for type_, contenu in (("begin", None), ("instr", instruction), ("separate", None), ("texte", texte_provisoire), ("end", None)):
-        if type_ == "instr":
-            el = OxmlElement("w:instrText"); el.set(qn("xml:space"), "preserve"); el.text = contenu
-        elif type_ == "texte":
-            el = OxmlElement("w:t"); el.text = contenu
-        else:
-            el = OxmlElement("w:fldChar"); el.set(qn("w:fldCharType"), type_)
-        run._r.append(el)
+def _tableau(doc, entetes, largeurs_mm=None):
+    t = doc.add_table(rows=1, cols=len(entetes))
+    t.style = "Table Grid"
+    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, h in enumerate(entetes):
+        _cell(t.rows[0].cells[i], h, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, size=9.5)
+        _ombrer(t.rows[0].cells[i], "E7E6E6")
+    trPr = t.rows[0]._tr.get_or_add_trPr()
+    th = OxmlElement("w:tblHeader")
+    th.set(qn("w:val"), "true")
+    trPr.append(th)
+    t._largeurs = largeurs_mm
+    return t
 
 
-class Rapport:
-    def __init__(self):
-        self.doc = Document()
-        self.n_tableau = 0
-        self.n_figure = 0
-        s = self.doc.sections[0]
-        s.page_width, s.page_height = Cm(21), Cm(29.7)
-        s.left_margin = s.right_margin = Cm(2.3)
-        s.top_margin = s.bottom_margin = Cm(2.2)
-        normal = self.doc.styles["Normal"]
-        normal.font.name = "Times New Roman"; normal.font.size = Pt(12)
-        normal.element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
-        normal.paragraph_format.space_after = Pt(6)
-        for niveau, taille in ((1, 15), (2, 13), (3, 12)):
-            st = self.doc.styles[f"Heading {niveau}"]
-            st.font.name = "Times New Roman"; st.font.size = Pt(taille); st.font.bold = True
-            st.font.color.rgb = RGBColor(0, 0, 0)
-            st.element.rPr.rFonts.set(qn("w:ascii"), "Times New Roman"); st.element.rPr.rFonts.set(qn("w:hAnsi"), "Times New Roman")
-            st.paragraph_format.space_before = Pt(14 if niveau == 1 else 10); st.paragraph_format.space_after = Pt(6)
-        # numéro de page en pied de page
-        pied = s.footer.paragraphs[0]; pied.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        champ(pied, "PAGE", "1")
-        # demande à Word de mettre à jour la table des matières à l'ouverture
-        upd = OxmlElement("w:updateFields"); upd.set(qn("w:val"), "true")
-        self.doc.settings.element.append(upd)
-
-    # --- texte
-    def titre(self, texte, niveau=1):
-        return self.doc.add_heading(texte, level=niveau)
-
-    def para(self, texte="", gras=False, italique=False, align=WD_ALIGN_PARAGRAPH.JUSTIFY, taille=None):
-        p = self.doc.add_paragraph(); p.alignment = align
-        if texte:
-            r = p.add_run(texte); r.bold = gras; r.italic = italique
-            if taille: r.font.size = Pt(taille)
-        return p
-
-    def a_completer(self, texte):
-        p = self.doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        r = p.add_run(f"[À compléter] {texte}"); r.font.highlight_color = WD_COLOR_INDEX.YELLOW; r.italic = True
-        return p
-
-    def puces(self, elements):
-        for e in elements:
-            p = self.doc.add_paragraph(style="List Bullet"); p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            p.add_run(e)
-
-    def saut_de_page(self):
-        self.doc.add_paragraph().add_run().add_break(WD_BREAK.PAGE)
-
-    # --- tableaux et figures
-    def legende_tableau(self, texte):
-        self.n_tableau += 1
-        p = self.para(f"Tableau {self.n_tableau} {texte}", gras=True, italique=True, align=WD_ALIGN_PARAGRAPH.CENTER, taille=11)
-        p.paragraph_format.keep_with_next = True; p.paragraph_format.space_before = Pt(8)
-
-    def tableau(self, entetes, lignes, largeurs=None, taille=9, derniere_ligne_grasse=False, centrer_apres=1):
-        t = self.doc.add_table(rows=1, cols=len(entetes)); t.style = "Table Grid"; t.alignment = WD_TABLE_ALIGNMENT.CENTER
-        for i, e in enumerate(entetes):
-            c = t.rows[0].cells[i]; c.text = ""; griser(c, "1B4332")
-            r = c.paragraphs[0].add_run(e); r.bold = True; r.font.size = Pt(taille); r.font.color.rgb = RGBColor(255, 255, 255)
-            c.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
-        trPr = t.rows[0]._tr.get_or_add_trPr(); h = OxmlElement("w:tblHeader"); h.set(qn("w:val"), "true"); trPr.append(h)
-        for n, ligne in enumerate(lignes):
-            cells = t.add_row().cells
-            derniere = derniere_ligne_grasse and n == len(lignes) - 1
-            for i, v in enumerate(ligne):
-                cells[i].text = ""
-                par = cells[i].paragraphs[0]
-                lignes_txt = str(v).split("\n")
-                for k, morceau in enumerate(lignes_txt):
-                    r = par.add_run(morceau); r.font.size = Pt(taille); r.bold = derniere
-                    if k < len(lignes_txt) - 1: r.add_break()
-                par.alignment = WD_ALIGN_PARAGRAPH.CENTER if i >= centrer_apres else WD_ALIGN_PARAGRAPH.LEFT
-                if derniere: griser(cells[i], "EAE6D6")
-        if not largeurs:
-            n = len(entetes)
-            if n > 2 and str(entetes[-1]).startswith("Montant"):
-                largeurs = [3.6] + [round((16.4 - 3.6 - 2.6) / (n - 2), 2)] * (n - 2) + [2.6]
-            else:
-                largeurs = [4.6] + [round((16.4 - 4.6) / (n - 1), 2)] * (n - 1) if n > 1 else [16.4]
-        t.autofit = False
-        disposition = OxmlElement("w:tblLayout"); disposition.set(qn("w:type"), "fixed"); t._tbl.tblPr.append(disposition)
-        for i, w in enumerate(largeurs): t.columns[i].width = Cm(w)
+def _largeurs(t):
+    if t._largeurs:
         for row in t.rows:
-            for i, w in enumerate(largeurs): row.cells[i].width = Cm(w)
-        self.doc.add_paragraph().paragraph_format.space_after = Pt(2)
-        return t
+            for c, w in zip(row.cells, t._largeurs):
+                c.width = Mm(w)
 
-    def figure(self, fig, legende, largeur_cm=14):
-        tampon = io.BytesIO(); fig.savefig(tampon, format="png", dpi=170, bbox_inches="tight"); plt.close(fig); tampon.seek(0)
-        p = self.doc.add_paragraph(); p.alignment = WD_ALIGN_PARAGRAPH.CENTER; p.paragraph_format.keep_with_next = True
-        p.add_run().add_picture(tampon, width=Cm(largeur_cm))
-        self.n_figure += 1
-        self.para(f"Figure {self.n_figure} {legende}", gras=True, italique=True, align=WD_ALIGN_PARAGRAPH.CENTER, taille=11)
+
+def _ligne_fusionnee(t, texte):
+    row = t.add_row()
+    c = row.cells[0].merge(row.cells[-1])
+    _cell(c, texte, bold=True, align=WD_ALIGN_PARAGRAPH.CENTER, size=10)
+    return row
 
 
 # ------------------------------------------------------------------ graphiques
-def camembert(valeurs, etiquettes, titre=None):
-    fig, ax = plt.subplots(figsize=(6.2, 3.8))
-    donnees = [(v, e) for v, e in zip(valeurs, etiquettes) if v > 0]
-    if not donnees:
-        ax.text(0.5, 0.5, "Aucune donnée", ha="center"); ax.axis("off"); return fig
-    vals = [d[0] for d in donnees]; total = sum(vals)
-    couleurs = COULEURS[:len(vals)]
-    wedges, _, autotexts = ax.pie(vals, colors=couleurs, startangle=90, counterclock=False, autopct=lambda p: f"{p:.1f}%",
-                                  pctdistance=0.78, wedgeprops={"width": 0.45, "edgecolor": "white"}, textprops={"fontsize": 8, "color": "white", "weight": "bold"})
-    ax.legend(wedges, [f"{e} — {pct(v, total):.2f}% ({int(v) if float(v).is_integer() else v:,})".replace(",", " ") for v, e in donnees],
-              loc="center left", bbox_to_anchor=(1.0, 0.5), fontsize=8, frameon=False)
-    ax.set(aspect="equal")
-    if titre: ax.set_title(titre, fontsize=9)
-    return fig
+def _png_camembert(labels, valeurs):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+    pairs = [(l, v) for l, v in zip(labels, valeurs) if v]
+    if not pairs:
+        return None
+    fig, ax = plt.subplots(figsize=(6, 4.2))
+    ax.pie([v for _, v in pairs], autopct="%1.2f%%", startangle=90, textprops={"fontsize": 9})
+    total = sum(v for _, v in pairs)
+    ax.legend(["%s — %.2f%% (%s)" % (l, 100 * v / total, v) for l, v in pairs],
+              loc="upper center", bbox_to_anchor=(0.5, 0.0), fontsize=8, frameon=False)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
-def histogramme_conformite(entites, taux_conformes):
-    fig, ax = plt.subplots(figsize=(7, 3.6))
-    x = range(len(entites)); l = 0.38
-    ax.bar([i - l / 2 for i in x], taux_conformes, l, label="Conformes", color=COULEURS[0])
-    ax.bar([i + l / 2 for i in x], [100 - t for t in taux_conformes], l, label="Non conformes", color=COULEURS[1])
-    for i, t in enumerate(taux_conformes):
-        ax.text(i - l / 2, t + 1.5, f"{t:.0f}%", ha="center", fontsize=7); ax.text(i + l / 2, 100 - t + 1.5, f"{100 - t:.0f}%", ha="center", fontsize=7)
-    ax.set_xticks(list(x)); ax.set_xticklabels([(e if len(e) < 26 else e[:24] + "…").replace(" et ses", "\net ses").replace(" - ", "\n") for e in entites], fontsize=7)
-    ax.set_ylim(0, 112); ax.set_ylabel("% des dossiers contrôlés", fontsize=8); ax.legend(fontsize=8, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=2)
-    ax.spines[["top", "right"]].set_visible(False); ax.grid(axis="y", alpha=.25)
-    return fig
+def _png_histo(noms, conformes, non_conformes):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return None
+    if not noms:
+        return None
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = list(range(len(noms)))
+    ax.bar([i - 0.2 for i in x], conformes, 0.4, label="Conforme")
+    ax.bar([i + 0.2 for i in x], non_conformes, 0.4, label="Non conforme")
+    ax.set_ylim(0, 100)
+    ax.set_yticks(range(0, 101, 10))
+    ax.set_yticklabels([str(v) + "%" for v in range(0, 101, 10)], fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels([n if len(n) < 28 else n[:26] + "…" for n in noms], fontsize=7)
+    ax.legend(fontsize=8)
+    ax.grid(axis="y", alpha=.3)
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
 
 
-def histogramme_notes(etapes, moyennes):
-    fig, ax = plt.subplots(figsize=(7, 3.4))
-    barres = ax.bar(range(len(etapes)), moyennes, color=[COULEURS[1] if m >= 2 else COULEURS[5] for m in moyennes])
-    ax.axhline(2, color="#5B6058", ls="--", lw=1, label="Seuil de conformité (2)"); ax.legend(fontsize=8, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.32))
-    for b, m in zip(barres, moyennes): ax.text(b.get_x() + b.get_width() / 2, m + .05, f"{m:.2f}", ha="center", fontsize=8)
-    ax.set_xticks(range(len(etapes))); ax.set_xticklabels([e.replace(" de mise en concurrence", "\nmise en conc.").replace(" ", "\n", 1) if len(e) > 14 else e for e in etapes], fontsize=7)
-    ax.set_ylim(0, 4.4); ax.set_ylabel("Note moyenne (0 à 4)", fontsize=8)
-    ax.spines[["top", "right"]].set_visible(False); ax.grid(axis="y", alpha=.25)
-    return fig
+def _image(doc, buf, largeur_cm=13):
+    if buf is None:
+        _para(doc, A_COMPLETER + " (figure à insérer)", align=WD_ALIGN_PARAGRAPH.CENTER)
+        return
+    doc.add_picture(buf, width=Cm(largeur_cm))
+    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 
-# ------------------------------------------------------------------ collecte des données
-def collecter(annee=None, debut=None, fin=None):
-    controles = Controle.query.filter(Controle.date_validation.isnot(None)).order_by(Controle.id).all()
-    derniers = {}
-    for c in controles:  # un seul contrôle (le plus récent) par marché
-        derniers[c.id_marche] = c
-    retenus = []
-    for c in derniers.values():
-        if annee and c.marche.annee_exercice != annee: continue
-        if debut and c.date_controle < debut: continue
-        if fin and c.date_controle > fin: continue
-        retenus.append(c)
-    return sorted(retenus, key=lambda c: (c.marche.entite.nom, c.marche.reference))
+# ------------------------------------------------------------------ données
+def _charger(annee, debut, fin):
+    q = (db.session.query(Controle)
+         .join(Marche, Controle.id_marche == Marche.id)
+         .filter(Controle.date_validation.isnot(None)))
+    if annee:
+        q = q.filter(Marche.annee_exercice == annee)
+    if debut:
+        q = q.filter(Controle.date_controle >= debut)
+    if fin:
+        q = q.filter(Controle.date_controle <= fin)
+    vus, controles = set(), []
+    for c in q.order_by(Controle.id.desc()).all():   # un seul contrôle validé (le plus récent) par marché
+        if c.id_marche not in vus:
+            vus.add(c.id_marche)
+            controles.append(c)
+    controles.sort(key=lambda c: (c.marche.entite.nom, c.id))
+    return controles
 
 
+def _libelle_fonction(u):
+    r = _val(u.role)
+    if r == "ADMIN":
+        return "Chef de la Commission Régionale des Marchés"
+    if r == "CHEF_SERVICE":
+        return "Membre de la Commission (Chef de service)"
+    if r == "CV":
+        return "Contrôleur Vérificateur"
+    return r.replace("_", " ").capitalize()
+
+
+def _periode(dates):
+    a, b = min(dates), max(dates)
+    m1, m2 = MOIS[a.month - 1].lower(), MOIS[b.month - 1].lower()
+    if a == b:
+        return "%d %s %d" % (a.day, m1, a.year)
+    if (a.month, a.year) == (b.month, b.year):
+        return "%d au %d %s %d" % (a.day, b.day, m1, a.year)
+    return "%d %s %d au %d %s %d" % (a.day, m1, a.year, b.day, m2, b.year)
+
+
+# ------------------------------------------------------------------ génération
 def generer(annee=None, debut=None, fin=None, region=None):
-    controles = collecter(annee, debut, fin)
-    natures = [n.libelle for n in NatureMarche.query.order_by(NatureMarche.id)]
-    modes = [m.libelle for m in ModePassation.query.order_by(ModePassation.id)]
-    etapes = Etape.query.order_by(Etape.ordre).all()
-    entites = sorted({c.marche.entite for c in controles}, key=lambda e: e.nom)
-    total = len(controles)
-    conformes = sum(1 for c in controles if c.conclusion == "CONFORME")
-    exercice = annee or (max((c.marche.annee_exercice for c in controles), default=date.today().year))
-    region = region or Counter(e.region for e in entites if e.region).most_common(1)[0][0] if any(e.region for e in entites) else (region or "")
-    nb = Counter(e.type for e in entites)
+    controles = _charger(annee, debut, fin)
+    exercice = annee or max((c.marche.annee_exercice for c in controles if c.marche.annee_exercice),
+                            default=date.today().year)
+    region = region or A_COMPLETER
 
-    R = Rapport(); doc = R.doc
-
-    # ============================ COUVERTURE ============================
-    for ligne in ORGANISME + ([region.upper()] if region else []):
-        p = R.para(ligne, gras=True, align=WD_ALIGN_PARAGRAPH.CENTER, taille=12); p.paragraph_format.space_after = Pt(2)
-        p2 = R.para("……………………………", align=WD_ALIGN_PARAGRAPH.CENTER); p2.paragraph_format.space_after = Pt(2)
-    for _ in range(7): R.para("")
-    p = R.para("", align=WD_ALIGN_PARAGRAPH.CENTER); bordure_paragraphe(p)
-    r = p.add_run(f"Rapport de mission de contrôle a posteriori des marchés passés au titre de l'exercice budgétaire {exercice} "
-                  f"auprès de {nombre(len(entites))} entité{'s' if len(entites) > 1 else ''} publique{'s' if len(entites) > 1 else ''}"
-                  + (" dont :" if entites else "")); r.bold = True; r.font.size = Pt(18)
-    p.paragraph_format.space_after = Pt(10)
-    for libelle, cle in (("STD", "STD"), ("CTD", "CTD"), ("Établissement(s) Public(s)", "EPN")):
-        if nb[cle]:
-            q = R.para("", align=WD_ALIGN_PARAGRAPH.LEFT); q.paragraph_format.left_indent = Cm(3.5)
-            rr = q.add_run(f"▪  {en_lettres(nb[cle]).upper()} ({nb[cle]:02d}) {libelle}"); rr.bold = True; rr.font.size = Pt(15)
-    for _ in range(6): R.para("")
-    p = R.para("", align=WD_ALIGN_PARAGRAPH.CENTER); rr = p.add_run(mois_annee(date.today())); rr.bold = True; rr.underline = True
-    R.saut_de_page()
-
-    # ============================ TABLE DES MATIÈRES ============================
-    R.para("TABLE DES MATIÈRES", gras=True, align=WD_ALIGN_PARAGRAPH.CENTER, taille=14)
-    champ(R.para(""), 'TOC \\o "1-2" \\h \\z \\u', "Clic droit sur ce texte puis « Mettre à jour les champs » pour afficher la table des matières.")
-    R.saut_de_page()
-
-    # ============================ 1. INTRODUCTION ============================
-    R.titre("1. INTRODUCTION")
-    R.para("Dans un contexte de renforcement de la bonne gouvernance et de la transparence dans la gestion des finances publiques, "
-           "le contrôle des marchés publics occupe une place stratégique dans le dispositif national de régulation des dépenses publiques. "
-           "À Madagascar, cette dynamique est encadrée par la Loi n°2016-055 du 25 janvier 2017 portant Code des marchés publics, qui fixe "
-           "les principes de transparence, de libre concurrence et d'égalité de traitement applicables à la passation, à l'exécution et au contrôle des marchés.")
-    R.para("L'allègement du contrôle a priori responsabilise davantage les autorités contractantes ; il est compensé par le renforcement du contrôle "
-           "a posteriori, instrument essentiel de maîtrise permettant de vérifier, après passation, la conformité des procédures avec les dispositions en vigueur.")
-    R.para(f"Le présent rapport présente les résultats de la mission de contrôle a posteriori des marchés passés au titre de l'exercice {exercice}"
-           + (f" par {nombre(len(entites))} entité{'s' if len(entites) > 1 else ''}" if entites else "")
-           + (f" ({', '.join(f'{nb[k]} {k}' for k in ('STD', 'CTD', 'EPN') if nb[k])})" if entites else "") + ", dans la limite de la compétence territoriale de la Commission.")
-    R.para("Les objectifs spécifiques du contrôle sont de :")
-    R.puces(["vérifier la régularité des procédures de passation et d'exécution des marchés ;",
-             "identifier les bonnes pratiques ainsi que les éventuelles irrégularités ou défaillances ;",
-             "formuler des recommandations visant à améliorer la qualité et la conformité des procédures ;",
-             "renforcer les capacités des entités dans l'application des règles de la commande publique."])
-
-    # ============================ 2. MÉTHODOLOGIE ============================
-    R.titre("2. APPROCHE MÉTHODOLOGIQUE")
-    R.para("La méthodologie repose sur trois étapes : la définition des entités et des contrats à contrôler, l'analyse de la conformité de chaque "
-           "procédure de passation, de la planification à l'établissement du contrat, puis la restitution des résultats auprès de chaque entité contrôlée.")
-    R.titre("2.1. Définition des entités et des contrats à contrôler", 2)
-    R.a_completer("Rappeler les critères de sélection des entités (volume et valeur des marchés, diversité institutionnelle, historique de non-conformité, couverture géographique…) "
-                  "et des marchés (nature, mode de passation, tranche de montant, étapes du cycle de vie couvertes).")
-    R.titre("2.2. Analyse de conformité des procédures", 2)
-    R.para("Chaque étape de la procédure de passation est appréciée et notée de 0 à 4 selon sa conformité avec les règles et procédures en vigueur :")
-    R.tableau(["Note", "Appréciation"], [["0", "Existence d'importantes irrégularités ou anomalies (en nombre)"], ["1", "Existence d'irrégularités ou anomalies"],
-                                          ["2", "Généralement acceptable"], ["3", "Acceptable"], ["4", "Excellente maîtrise"]], largeurs=[2.5, 13], taille=10)
-    R.para("La conformité d'une procédure est appréciée à partir de la moyenne des notes des étapes : une note supérieure ou égale à 2 est jugée conforme en tendance, "
-           "une note inférieure à 2 est jugée non conforme en tendance. Toutefois, la passation d'un marché hors Plan de Passation des Marchés (PPM), l'existence d'une "
-           "irrégularité impactant l'attribution du marché ou un marché de régularisation rendent la procédure définitivement non conforme, quelle que soit la moyenne.")
-    R.para("Les étapes évaluées sont les suivantes : " + " ; ".join(e.libelle for e in etapes) + ".")
-    R.titre("2.3. Analyse du système d'archivage", 2)
-    R.a_completer("Appréciation générale du système d'archivage par entité.")
-    R.titre("2.4. Descentes auprès des organismes publics", 2)
-    if controles:
-        du = min(c.date_controle for c in controles); au = max(c.date_validation.date() for c in controles)
-        R.para(f"Les opérations de contrôle se sont déroulées du {du.day} {MOIS[du.month - 1]} {du.year} au {au.day} {MOIS[au.month - 1]} {au.year} "
-               "(calendrier détaillé en Annexe 3).")
-    R.a_completer("Organisation des équipes de contrôle, visites de courtoisie et réunions préparatoires.")
-    R.titre("2.5. Déroulement de la mission", 2)
-    R.a_completer("Conditions de déroulement de la mission et coopération des entités.")
-    R.titre("2.6. Restitution des résultats et rapport de contrôle", 2)
-    R.para("Une séance de restitution est organisée par entité contrôlée afin de communiquer les résultats. À l'issue de la mission, une fiche de restitution par entité "
-           "ainsi que le présent rapport sont établis ; ce dernier est compilé au niveau central en vue du rapport de contrôle a posteriori de la Commission Nationale des Marchés.")
-
-    # ============================ 3. DONNÉES GÉNÉRALES ============================
-    R.titre("3. DONNÉES GÉNÉRALES")
-    R.titre("3.1. Entités contrôlées", 2)
-    if not controles:
-        R.para("Aucun contrôle validé ne correspond aux critères choisis : les tableaux ci-dessous sont vides. Validez au moins un contrôle dans l'application puis régénérez le rapport.")
-    R.para(f"{nombre(len(entites)).capitalize()} entité{'s ont' if len(entites) > 1 else ' a'} fait l'objet d'un contrôle pour les marchés passés au titre de l'exercice {exercice} (Tableau 1).")
-    R.legende_tableau("Liste des entités contrôlées")
-    R.tableau(["N°", "Entité", "Type", "Marchés contrôlés"],
-              [[i + 1, e.nom, e.type, sum(1 for c in controles if c.marche.id_entite == e.id)] for i, e in enumerate(entites)],
-              largeurs=[1.3, 9.5, 2, 3.2], centrer_apres=2)
-
-    # --- agrégats
-    def agreger(cle_col, colonnes, valeur):
-        par_entite = {e.id: defaultdict(float) for e in entites}
-        for c in controles:
-            par_entite[c.marche.id_entite][cle_col(c)] += valeur(c)
-        lignes = [[e.nom] + [par_entite[e.id][col] for col in colonnes] + [sum(par_entite[e.id].values())] for e in entites]
-        totaux = ["TOTAL GÉNÉRAL"] + [sum(par_entite[e.id][col] for e in entites) for col in colonnes] + [sum(sum(par_entite[e.id].values()) for e in entites)]
-        return lignes, totaux
-
-    R.titre("3.2. Statistiques sur les contrats contrôlés", 2)
-    R.para(f"Les contrôleurs ont examiné {nombre(total)} échantillon{'s' if total > 1 else ''} de contrats.")
-
-    lignes, tot = agreger(lambda c: c.marche.nature.libelle, natures, lambda c: 1)
-    R.titre("3.2.1. Nombre de contrats contrôlés par nature", 3)
-    if total:
-        detail = ", ".join(f"{nombre(int(v))} de {n.lower()}" for n, v in zip(natures, tot[1:-1]) if v)
-        R.para(f"Parmi les contrats contrôlés, {detail}.")
-    R.legende_tableau("Nombre de contrats contrôlés par nature")
-    R.tableau(["Entité"] + [f"Marchés de {n.lower()}" for n in natures] + ["Total"], [[l[0]] + [int(x) for x in l[1:]] for l in lignes] + [[tot[0]] + [int(x) for x in tot[1:]]],
-              taille=8, derniere_ligne_grasse=True)
-    R.figure(camembert(tot[1:-1], natures), "Proportion des contrats contrôlés par nature", 13)
-
-    lignes, tot = agreger(lambda c: c.marche.mode_passation.libelle, modes, lambda c: 1)
-    R.titre("3.2.2. Nombre de contrats contrôlés par mode de passation", 3)
-    if total:
-        detail = ", ".join(f"{nombre(int(v))} {ABREV_MODES.get(m, m)}" for m, v in zip(modes, tot[1:-1]) if v)
-        R.para(f"Parmi les contrats contrôlés : {detail}.")
-    R.legende_tableau("Nombre de contrats contrôlés par mode de passation")
-    R.tableau(["Entité"] + [ABREV_MODES.get(m, m) for m in modes] + ["Total"], [[l[0]] + [int(x) for x in l[1:]] for l in lignes] + [[tot[0]] + [int(x) for x in tot[1:]]],
-              taille=8, derniere_ligne_grasse=True)
-    R.figure(camembert(tot[1:-1], [ABREV_MODES.get(m, m) for m in modes]), "Proportion des contrats contrôlés par mode de passation", 13)
-
-    lignes, tot = agreger(lambda c: c.marche.nature.libelle, natures, lambda c: float(c.marche.montant))
-    R.titre("3.2.3. Montant des contrats contrôlés par nature", 3)
-    if total:
-        detail = ", ".join(f"{n.lower()} : {ar(v)} Ar" for n, v in zip(natures, tot[1:-1]) if v)
-        R.para(f"Parmi les contrats contrôlés, la valeur des marchés s'élève, par nature, à : {detail} (Tableau {R.n_tableau + 1}).")
-    R.legende_tableau("Montant des contrats contrôlés par nature (en Ariary)")
-    R.tableau(["Entité"] + [f"Marchés de {n.lower()}" for n in natures] + ["Montant total"], [[l[0]] + [ar(x) for x in l[1:]] for l in lignes] + [[tot[0]] + [ar(x) for x in tot[1:]]],
-              taille=8, derniere_ligne_grasse=True)
-    R.figure(camembert(tot[1:-1], natures), "Répartition des montants contrôlés par nature", 13)
-
-    lignes, tot = agreger(lambda c: c.marche.mode_passation.libelle, modes, lambda c: float(c.marche.montant))
-    R.titre("3.2.4. Montant des contrats contrôlés par mode de passation", 3)
-    if total:
-        detail = ", ".join(f"{ABREV_MODES.get(m, m)} : {ar(v)} Ar" for m, v in zip(modes, tot[1:-1]) if v)
-        R.para(f"Parmi les contrats contrôlés, la valeur des marchés s'élève, par mode de passation, à : {detail} (Tableau {R.n_tableau + 1}).")
-    R.legende_tableau("Montant des contrats contrôlés par mode de passation (en Ariary)")
-    R.tableau(["Entité"] + [ABREV_MODES.get(m, m) for m in modes] + ["Montant total"], [[l[0]] + [ar(x) for x in l[1:]] for l in lignes] + [[tot[0]] + [ar(x) for x in tot[1:]]],
-              taille=8, derniere_ligne_grasse=True)
-    R.figure(camembert(tot[1:-1], [ABREV_MODES.get(m, m) for m in modes]), "Répartition des montants contrôlés par mode de passation", 13)
-
-    # ============================ 4. RÉSULTATS ============================
-    R.titre("4. RÉSULTATS DU CONTRÔLE")
-    R.titre("4.1. Taux de conformité", 2)
-    lignes_conf = []
-    nb_carence_total = 0
-    taux_entites = []
+    par_entite = OrderedDict()
+    for c in controles:
+        par_entite.setdefault(c.marche.entite, []).append(c)
+    entites = list(par_entite.keys())
+    n_ent = len(entites)
+    types = defaultdict(int)
     for e in entites:
-        cs = [c for c in controles if c.marche.id_entite == e.id]
-        ok = sum(1 for c in cs if c.conclusion == "CONFORME")
-        carence = sum(1 for c in cs if any(d.type_document.libelle == "PV de carence" for d in PieceJointe.query.filter_by(id_marche=c.id_marche).all()))
-        nb_carence_total += carence
-        lignes_conf.append([e.nom, len(cs), ok, len(cs) - ok, carence]); taux_entites.append(pct(ok, len(cs)))
-    R.para(f"L'analyse des données a permis d'établir que, sur un total de {nombre(total)} échantillon{'s' if total > 1 else ''} de contrats contrôlés, "
-           f"{nombre(conformes)} dossier{'s sont jugés conformes' if conformes > 1 else ' est jugé conforme'} à la réglementation, soit un taux de conformité de {pct(conformes, total):.2f} % (Tableau {R.n_tableau + 1}).")
-    R.legende_tableau("Nombre de dossiers conformes / non conformes")
-    R.tableau(["Entité", "Dossiers contrôlés", "Conforme", "Non conforme", "PV de carence"],
-              lignes_conf + [["TOTAL", total, conformes, total - conformes, nb_carence_total],
-                             ["TAUX", "", f"{pct(conformes, total):.2f}%", f"{pct(total - conformes, total):.2f}%", ""]],
-              taille=9, largeurs=[7, 2.5, 2.2, 2.4, 2.2], derniere_ligne_grasse=True)
-    if len(entites) > 1:
-        meilleur = max(zip(taux_entites, entites), key=lambda x: x[0]); pire = min(zip(taux_entites, entites), key=lambda x: x[0])
-        R.para(f"Les taux de conformité varient d'une entité à l'autre : ils vont de {pire[0]:.0f} % pour {pire[1].nom} à {meilleur[0]:.0f} % pour {meilleur[1].nom} (Figure {R.n_figure + 1}).")
-    if entites:
-        R.figure(histogramme_conformite([e.nom for e in entites], taux_entites), "Taux de conformité des procédures par entité", 15)
-    R.a_completer("Interpréter ces écarts (appropriation des procédures, contrôle a priori antérieur, formation, pressions…).")
+        types[_val(e.type)] += 1
 
-    # notes moyennes par étape
+    def nat(c):
+        return c.marche.nature.libelle if c.marche.nature else "Non renseigné"
+
+    def mod(c):
+        return c.marche.mode_passation.libelle if c.marche.mode_passation else "Non renseigné"
+
+    natures = sorted({nat(c) for c in controles})
+    modes = sorted({mod(c) for c in controles})
+    total = len(controles)
+    conformes = sum(1 for c in controles if _val(c.conclusion) == "CONFORME")
+
+    # ---------------- document
+    doc = Document()
+    s = doc.sections[0]
+    s.page_width, s.page_height = Mm(210), Mm(297)
+    s.left_margin = s.right_margin = Mm(25)
+    s.top_margin = s.bottom_margin = Mm(25)
+    normal = doc.styles["Normal"]
+    normal.font.name = "Times New Roman"
+    normal.font.size = Pt(12)
+    normal.element.rPr.rFonts.set(qn("w:eastAsia"), "Times New Roman")
+    for st in ("Heading 1", "Heading 2", "Heading 3"):
+        doc.styles[st].font.name = "Times New Roman"
+        doc.styles[st].font.color.rgb = None
+    upd = OxmlElement("w:updateFields")
+    upd.set(qn("w:val"), "true")
+    doc.settings.element.append(upd)
+
+    fp = s.footer.paragraphs[0]
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _champ(fp, "PAGE", "1")
+
+    # ---------------- couverture
+    for ligne, gras in [("MINISTERE DE L’ECONOMIE ET DES FINANCES", True), ("……………………………", False),
+                        ("COMMISSION NATIONALE DES MARCHES", True), ("………………………", False),
+                        ("COMMISSION REGIONALE DES MARCHES", True),
+                        (region.upper() if region != A_COMPLETER else region, True), ("…………………….", False)]:
+        _para(doc, ligne, align=WD_ALIGN_PARAGRAPH.CENTER, bold=gras, size=11)
+    for _ in range(6):
+        doc.add_paragraph()
+    boite = doc.add_paragraph()
+    boite.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    pPr = boite._p.get_or_add_pPr()
+    bd = OxmlElement("w:pBdr")
+    for cote in ("top", "left", "bottom", "right"):
+        e = OxmlElement("w:" + cote)
+        e.set(qn("w:val"), "double")
+        e.set(qn("w:sz"), "12")
+        e.set(qn("w:space"), "10")
+        e.set(qn("w:color"), "4E9A2F")
+        bd.append(e)
+    pPr.append(bd)
+    _ecrire(boite, "Rapport de mission de contrôle a posteriori des marchés passés au titre de l’exercice "
+                   "budgétaire %s auprès de %s (%s) entités publiques dont :"
+            % (exercice, NOMBRES.get(n_ent, str(n_ent)).lower(), _nb(n_ent)), bold=True, size=15)
+    for t_, lib in (("STD", "STD"), ("CTD", "CTD"), ("EPN", "Etablissements Publics")):
+        if types.get(t_):
+            p = doc.add_paragraph()
+            p.paragraph_format.left_indent = Cm(3)
+            _ecrire(p, "▪ %s %s" % (_lettres(types[t_]), lib), bold=True, size=14)
+    for _ in range(6):
+        doc.add_paragraph()
+    _para(doc, "%s %d" % (MOIS[date.today().month - 1], date.today().year),
+          align=WD_ALIGN_PARAGRAPH.CENTER, bold=True, underline=True)
+    _saut_page(doc)
+
+    # ---------------- sommaire
+    _para(doc, "TABLE DES MATIERES", align=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
+    _champ(doc.add_paragraph(), 'TOC \\o "1-3" \\h \\z \\u',
+           "Clic droit › Mettre à jour le champ pour afficher le sommaire.")
+    _para(doc, "LISTE DES TABLEAUX", align=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
+    _champ(doc.add_paragraph(), 'TOC \\h \\z \\c "Tableau"', "")
+    _para(doc, "LISTE DES FIGURES", align=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
+    _champ(doc.add_paragraph(), 'TOC \\h \\z \\c "Figure"', "")
+    _saut_page(doc)
+
+    _para(doc, "LISTE DES SIGLES ET ABREVIATIONS", align=WD_ALIGN_PARAGRAPH.CENTER, bold=True)
+    for sg, df in [("CRM", "Commission Régionale des Marchés Publics"), ("STD", "Services Techniques Déconcentrés"),
+                   ("CTD", "Collectivité Territoriale Décentralisée"), ("EPN", "Etablissement Public National"),
+                   ("SIGMP", "Système Informatisé de Gestion des Marchés Publics"),
+                   ("SIIGFP", "Système Intégré Informatisé de Gestion des Finances Publiques"),
+                   ("PRMP", "Personne Responsable des Marchés Publics"),
+                   ("MEF", "Ministère de l’Economie et des Finances"), ("PV", "Procès-Verbal"),
+                   ("AOR", "Appel d’Offres Restreint"), ("MGG", "Marché de Gré à Gré"),
+                   ("PPM", "Plan de Passation des Marchés Publics"),
+                   ("AGPM", "Avis Général de Passation des Marchés Publics"),
+                   ("DAO", "Dossier d’Appel d’Offres"), ("CAO", "Commission d’Appel d’Offre"),
+                   ("CCAP", "Cahier de Clause Administrative Particulière"),
+                   ("CNM", "Commission Nationale des Marchés"),
+                   ("UGPM", "Unité de Gestion des Passations des Marchés"),
+                   ("NIF", "Numéro d’Identification Fiscale"), ("STAT", "Statistique")]:
+        p = doc.add_paragraph()
+        _ecrire(p, sg + " : ", bold=True)
+        _ecrire(p, df)
+        p.paragraph_format.space_after = Pt(0)
+    _saut_page(doc)
+
+    # ---------------- 1. Introduction
+    _titre(doc, "1. INTRODUCTION")
+    _para(doc, "Dans un contexte de renforcement de la bonne gouvernance et de transparence dans la gestion des "
+               "finances publiques, le contrôle des marchés publics occupe une place stratégique dans le dispositif "
+               "national de régulation des dépenses publiques. À Madagascar, cette dynamique est encadrée par la "
+               "Loi n°2016-055 du 25 janvier 2017 portant Code des marchés publics. Le contrôle a posteriori, "
+               "instrument essentiel de maîtrise, permet de vérifier, après exécution, la conformité des procédures "
+               "avec les dispositions en vigueur.")
+    _para(doc, "Pour la Commission Régionale des Marchés (CRM) de la région %s, cette mission s’inscrit dans une "
+               "double logique : accompagner les entités dans l’application correcte des procédures, et évaluer la "
+               "régularité, la transparence et l’efficience de la commande publique régionale, dans un esprit de "
+               "redevabilité." % region)
+    det = ", ".join("%s %s" % (_lettres(types[t]), t) for t in ("STD", "CTD", "EPN") if types.get(t)) or A_COMPLETER
+    _para(doc, "Le présent rapport présente les résultats de la mission de contrôle a posteriori des marchés passés "
+               "en %s auprès de %s entités (%s), dans la limite de sa compétence territoriale. %s "
+               "(justification du nombre d’entités contrôlées)." % (exercice, _lettres(n_ent), det, A_COMPLETER))
+    _para(doc, "L’objectif général du contrôle consiste à garantir la conformité des pratiques contractuelles avec "
+               "les normes en vigueur, renforcer la transparence et promouvoir la bonne gouvernance. Les objectifs "
+               "spécifiques sont :")
+    _puces(doc, ["Vérifier la régularité des procédures de passation et d’exécution des marchés ;",
+                 "Identifier les bonnes pratiques et les éventuelles irrégularités ou défaillances ;",
+                 "Formuler des recommandations visant à améliorer la qualité et la conformité des procédures ;",
+                 "Renforcer les capacités des entités régionales dans l’application des règles de la commande "
+                 "publique."])
+
+    # ---------------- 2. Méthodologie
+    _titre(doc, "2. APPROCHE METHODOLOGIQUE")
+    _para(doc, "La méthodologie adoptée repose sur trois étapes :")
+    _puces(doc, ["Définition de la liste des entités et des contrats à contrôler, à partir du SIGMP, des fiches "
+                 "centralisées des engagements du SIIGFP et de la liste fournie par l’entité contrôlée ;",
+                 "Analyse de la conformité d’une procédure de passation, de la planification à l’établissement du "
+                 "contrat, sur la base d’un échantillon de contrats ;",
+                 "Restitution des résultats du contrôle auprès de chaque entité, l’informant des irrégularités "
+                 "constatées et des procédures applicables."])
+    _titre(doc, "2.1. Définition des entités et des contrats à contrôler", 2)
+    _para(doc, "a) Méthode de sélection des entités à contrôler", bold=True)
+    _para(doc, "La sélection des entités a été fondée sur une combinaison de critères institutionnels et de critères "
+               "de risque : volume et valeur des marchés enregistrés auprès de la CRM, diversité institutionnelle, "
+               "couverture des entités n’ayant pas subi de contrôle a posteriori antérieur, marchés touchant la vie "
+               "quotidienne de la population, évolution des pratiques contractuelles, risque de réapparition de "
+               "pratiques non conformes, suspicion de manipulation contractuelle, historique de litiges et "
+               "couverture géographique équilibrée.")
+    _para(doc, "b) Méthode de sélection des marchés à contrôler", bold=True)
+    _para(doc, "Le contrôle a posteriori cible exclusivement les marchés non soumis au contrôle a priori de la CRM, "
+               "conformément à l’arrêté n° 20442/2019/MEF du 17/09/2019. Les marchés ont été sélectionnés selon la "
+               "nature (travaux, fournitures, services, avec priorité aux travaux), le mode de passation, le montant "
+               "et les aspects techniques et réglementaires couverts (planification, publicité, passation, "
+               "exécution, réception, archivage).")
+    _titre(doc, "2.2. Analyse de conformité des procédures", 2)
+    _para(doc, "La conformité est appréciée au regard des principes de l’article 5 de la loi n°2016-055 : liberté "
+               "d’accès à la commande publique, égalité de traitement des candidats et transparence des procédures. "
+               "Chaque étape est notée de 0 à 4 :")
+    _puces(doc, ["0 : existence d’importantes irrégularités ou anomalies (en nombre)",
+                 "1 : existence d’irrégularités ou anomalies", "2 : généralement acceptable",
+                 "3 : acceptable", "4 : excellente maîtrise"])
+    _para(doc, "Une procédure est jugée conforme en tendance si la moyenne des notes des étapes est supérieure ou "
+               "égale à 2, non conforme en tendance dans le cas contraire. Toutefois, la passation hors PPM, "
+               "l’existence d’une irrégularité impactant l’attribution du marché ou les marchés de régularisation "
+               "rendent la procédure définitivement non conforme. L’indisponibilité de pièces essentielles fait "
+               "l’objet d’un PV de carence signé par les deux parties.")
+    for titre, pts in [
+        ("2.2.1. Cas des mises en concurrence ouverte",
+         ["Publication des avis spécifiques de mise en concurrence", "PV d’ouverture des plis",
+          "Documents d’évaluation valides (date, signature, pluralité d’évaluateurs)",
+          "Information relative au résultat de la mise en concurrence (affichage et lettre d’information)"]),
+        ("2.2.2. Cas des Appels d’offres restreint (AOR)",
+         ["Lettre d’invitation adressée aux candidats de la liste restreinte et preuve de réception",
+          "PV d’ouverture des plis", "Documents d’évaluation valides",
+          "Information relative au résultat de la mise en concurrence"]),
+        ("2.2.3. Cas des marchés de prestations intellectuelles",
+         ["Publication de l’appel à manifestations d’intérêts", "Décision autorisant la liste restreinte",
+          "PV d’ouverture des plis", "Documents d’évaluation valides",
+          "Information relative au résultat de la mise en concurrence"]),
+        ("2.2.4. Cas des marchés de gré à gré (MGG)",
+         ["Rapport justificatif signé par la PRMP",
+          "Décision autorisant le gré à gré signée par l’autorité contractante",
+          "PV de validation du choix du titulaire et du montant par la CAO", "Document de marché"]),
+        ("2.2.5. Cas des achats directs",
+         ["Disponibilité d’une copie de l’acte d’engagement",
+          "Attribution du contrat : contrat recevable, acceptable, etc."]),
+        ("2.2.6. Autres points de vérification",
+         ["Existence du marché dans le PPM, transmission et publication des PPM et AGPM",
+          "Conformité des documents de mise en concurrence avec les modèles-types",
+          "Respect du délai de remise des offres, de l’évaluation et du délai de recours",
+          "Disponibilité, conformité et validité du contrat ; cohérence avec le DAO et l’offre de l’attributaire",
+          "Notification, ordre de service de commencer, avenants",
+          "Respect des délais de livraison et d’exécution, des clauses du CCAP",
+          "Réception dans les formes requises, cohérence avec le contrat, effectivité des prestations"])]:
+        _titre(doc, titre, 3)
+        _puces(doc, pts)
+    _titre(doc, "2.3. Analyse du système d’archivage", 2)
+    _para(doc, "Le système d’archivage fait l’objet d’une appréciation générale par entité et de recommandations "
+               "appropriées.")
+    _titre(doc, "2.4. Descentes auprès des organismes publics", 2)
+    _para(doc, A_COMPLETER + " (visites de courtoisie, réunions préparatoires, organisation des équipes de contrôle).")
+    _titre(doc, "2.5. Déroulement de la mission", 2)
+    _para(doc, A_COMPLETER + " (déroulement général, accès aux archives, information des entités).")
+    _titre(doc, "2.6. Restitution des résultats et rapport de contrôle", 2)
+    _para(doc, "Une séance de restitution est réalisée par organisme contrôlé. À l’issue de la mission, deux "
+               "documents sont établis : une fiche de restitution par entité, signée par les parties et remise à "
+               "l’entité, et le présent rapport, compilé au niveau central en vue du rapport de contrôle a "
+               "posteriori de la CNM à transmettre au Ministre de l’Economie et des Finances.")
+
+    # ---------------- 3. Données générales
+    _titre(doc, "3. DONNEES GENERALES")
+    _titre(doc, "3.1. Entités contrôlées", 2)
+    _para(doc, "%s entités ont fait l’objet de contrôle pour les marchés passés au titre de l’exercice budgétaire "
+               "%s (Tableau 1)." % (_lettres(n_ent), exercice))
+    _legende(doc, "Tableau", "Liste des entités contrôlées")
+    t = _tableau(doc, ["N°", "Entité", "Type"], [15, 120, 25])
+    for i, e in enumerate(entites, 1):
+        r = t.add_row()
+        _cell(r.cells[0], str(i), align=WD_ALIGN_PARAGRAPH.CENTER)
+        _cell(r.cells[1], e.nom)
+        _cell(r.cells[2], _val(e.type), align=WD_ALIGN_PARAGRAPH.CENTER)
+    _largeurs(t)
+
+    _titre(doc, "3.2. Statistique sur les contrats contrôlés", 2)
+    _para(doc, "Les contrôleurs ont examiné %s échantillons de contrats." % _lettres(total))
+
+    def tableau_croise(titre_legende, colonnes, cle, valeur, est_nombre):
+        _legende(doc, "Tableau", titre_legende)
+        tb = _tableau(doc, ["Années"] + colonnes + ["Total"])
+        tot = [0] * (len(colonnes) + 1)
+        fmt = _nb if est_nombre else _montant
+        for e, cs in par_entite.items():
+            _ligne_fusionnee(tb, e.nom)
+            r = tb.add_row()
+            _cell(r.cells[0], str(exercice), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+            vals = [sum(valeur(c) for c in cs if cle(c) == col) for col in colonnes]
+            vals.append(sum(vals))
+            for k, v in enumerate(vals):
+                tot[k] += v
+                _cell(r.cells[k + 1], fmt(v), align=WD_ALIGN_PARAGRAPH.RIGHT)
+        r = tb.add_row()
+        _cell(r.cells[0], "TOTAL GENERAL", bold=True)
+        for k, v in enumerate(tot):
+            _cell(r.cells[k + 1], fmt(v), bold=True, align=WD_ALIGN_PARAGRAPH.RIGHT)
+
     if controles:
-        notes = defaultdict(list)
-        for c in controles:
-            for ce in ControleEtape.query.filter_by(id_controle=c.id).all():
-                if ce.note is not None: notes[ce.id_etape].append(ce.note)
-        moyennes = [sum(notes[e.id]) / len(notes[e.id]) if notes[e.id] else 0 for e in etapes]
-        R.para("La note moyenne obtenue à chaque étape de la procédure met en évidence les points de la passation des marchés qui concentrent les difficultés.")
-        R.figure(histogramme_notes([e.libelle for e in etapes], moyennes), "Note moyenne par étape de la procédure de passation", 15)
+        _titre(doc, "3.2.1. Nombre de contrats contrôlés par nature", 3)
+        tableau_croise("Nombre de contrats contrôlés par nature", natures, nat, lambda c: 1, True)
+        _para(doc)
+        _image(doc, _png_camembert(natures, [sum(1 for c in controles if nat(c) == n) for n in natures]))
+        _legende(doc, "Figure", "Proportion des contrats contrôlés par nature")
 
-    # irrégularités
-    R.titre("4.2. Principales irrégularités", 2)
-    R.para("Les principales irrégularités et anomalies constatées sont présentées par étape de la procédure de passation (Tableau %d)." % (R.n_tableau + 1))
-    groupes = {e.id: OrderedDict_() for e in etapes}
+        _titre(doc, "3.2.2. Nombre de contrats contrôlés par mode de passation", 3)
+        tableau_croise("Nombre de contrats contrôlés par mode de passation", modes, mod, lambda c: 1, True)
+        _para(doc)
+        _image(doc, _png_camembert(modes, [sum(1 for c in controles if mod(c) == m) for m in modes]))
+        _legende(doc, "Figure", "Proportion des contrats contrôlés par mode de passation")
+
+        _titre(doc, "3.2.3. Montant des contrats contrôlés par nature", 3)
+        tableau_croise("Montant des contrats contrôlés par nature (Ar)", natures, nat,
+                       lambda c: float(c.marche.montant or 0), False)
+        _titre(doc, "3.2.4. Montant des contrats contrôlés par mode de passation", 3)
+        tableau_croise("Montant des contrats contrôlés par mode de passation (Ar)", modes, mod,
+                       lambda c: float(c.marche.montant or 0), False)
+    else:
+        _para(doc, "Aucun contrôle validé pour les critères choisis.")
+
+    # ---------------- 4. Résultats
+    _titre(doc, "4. RESULTATS DU CONTROLE")
+    _titre(doc, "4.1. Taux de conformité", 2)
+    _para(doc, "Sur un total de %s échantillons de contrats contrôlés, %s dossiers sont jugés conformes à la "
+               "réglementation, soit un taux de conformité de %s (Tableau 6)."
+          % (_lettres(total), _lettres(conformes), _taux(conformes, total)))
+    _legende(doc, "Tableau", "Nombre de dossiers conformes / non conformes")
+    t = _tableau(doc, ["Entité", "Dossiers contrôlés", "Conforme", "Non conforme", "PV de carence"],
+                 [70, 25, 22, 25, 22])
+    noms_h, c_h, n_h = [], [], []
+    for e, cs in par_entite.items():
+        ok = sum(1 for c in cs if _val(c.conclusion) == "CONFORME")
+        r = t.add_row()
+        _cell(r.cells[0], e.nom)
+        for k, v in enumerate([len(cs), ok, len(cs) - ok, 0]):
+            _cell(r.cells[k + 1], str(v), align=WD_ALIGN_PARAGRAPH.CENTER)
+        noms_h.append(e.nom)
+        c_h.append(round(100 * ok / len(cs)))
+        n_h.append(100 - round(100 * ok / len(cs)))
+    r = t.add_row()
+    for k, v in enumerate(["TOTAL", total, conformes, total - conformes, 0]):
+        _cell(r.cells[k], str(v), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER if k else WD_ALIGN_PARAGRAPH.LEFT)
+    r = t.add_row()
+    _cell(r.cells[0], "TAUX", bold=True)
+    _cell(r.cells[1], "")
+    _cell(r.cells[2], _taux(conformes, total), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _cell(r.cells[3], _taux(total - conformes, total), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+    _cell(r.cells[4], "")
+    _largeurs(t)
+    _para(doc)
+    _para(doc, "Les taux de conformité varient d’une entité à l’autre (Figure 3). %s (analyse des écarts et des "
+               "facteurs explicatifs)." % A_COMPLETER)
+    _image(doc, _png_histo(noms_h, c_h, n_h), 15)
+    _legende(doc, "Figure", "Taux de conformité des procédures par entité")
+
+    _titre(doc, "4.2. Principales irrégularités", 2)
+    _para(doc, "Les principales irrégularités et anomalies constatées sont présentées par étape de procédure de "
+               "passation de marchés (Tableau 7).")
+    groupes = {}
     for c in controles:
         for ce in ControleEtape.query.filter_by(id_controle=c.id).all():
-            for irr in Irregularite.query.filter_by(id_controle_etape=ce.id).all():
-                groupes[ce.id_etape].setdefault(irr.description, set()).add(c.marche.entite.nom)
-    lignes_irr = []
-    for e in etapes:
-        premier = True
-        for description, ents in groupes[e.id].items():
-            lignes_irr.append([e.libelle if premier else "", description, "\n".join(sorted(ents))]); premier = False
-    R.legende_tableau("Principales irrégularités")
-    if lignes_irr:
-        R.tableau(["Points de vérification", "Irrégularités et anomalies constatées", "Entités concernées"], lignes_irr, largeurs=[3.6, 8.2, 4.8], taille=9, centrer_apres=9)
-    else:
-        R.para("Aucune irrégularité n'a été enregistrée pour les contrôles retenus.")
+            for ir in Irregularite.query.filter_by(id_controle_etape=ce.id).order_by(Irregularite.id).all():
+                txt = (ir.irregularite or ir.description or "").strip()
+                if txt:
+                    groupes.setdefault((ce.etape.ordre, ce.etape.libelle), OrderedDict()) \
+                           .setdefault(txt, set()).add(c.marche.entite.nom)
+    _legende(doc, "Tableau", "Principales irrégularités")
+    t = _tableau(doc, ["Points de vérification", "Irrégularités et anomalies constatées", "Entités concernées"],
+                 [35, 85, 50])
+    if not groupes:
+        r = t.add_row()
+        _cell(r.cells[0], "—")
+        _cell(r.cells[1], "Aucune irrégularité constatée.")
+        _cell(r.cells[2], "—")
+    for (_, lib), irs in sorted(groupes.items(), key=lambda kv: kv[0]):
+        debut_i = len(t.rows)
+        for txt, ents in irs.items():
+            r = t.add_row()
+            _cell(r.cells[1], "- " + txt, size=9.5)
+            _cell(r.cells[2], ", ".join(sorted(ents)), size=9.5)
+        fin_i = len(t.rows) - 1
+        c0 = t.cell(debut_i, 0).merge(t.cell(fin_i, 0)) if fin_i > debut_i else t.cell(debut_i, 0)
+        _cell(c0, lib, bold=True)
+        _ombrer(c0, "E7E6E6")
+    _largeurs(t)
 
-    R.titre("4.3. Causes de non-conformité", 2)
+    _titre(doc, "4.3. Causes de non-conformité", 2)
+    _para(doc, "La conformité de chaque procédure est appréciée à partir de la moyenne des notes des étapes "
+               "(≥ 2 : conforme en tendance ; < 2 : non conforme en tendance). La passation hors PPM, "
+               "l’irrégularité impactant l’attribution et les marchés de régularisation rendent la procédure "
+               "définitivement non conforme.")
     hors_ppm = sum(1 for c in controles if c.marche.hors_ppm)
     regul = sum(1 for c in controles if c.marche.marche_regularisation)
-    impact = sum(1 for c in controles for ce in ControleEtape.query.filter_by(id_controle=c.id).all()
-                 if Irregularite.query.filter_by(id_controle_etape=ce.id, impacte_attribution=True).count())
-    R.para("Rappel : une moyenne des notes inférieure à 2 rend la procédure non conforme en tendance ; la passation hors PPM, un marché de régularisation ou une irrégularité "
-           "impactant l'attribution la rendent définitivement non conforme. Sur les dossiers contrôlés :")
-    R.puces([f"{hors_ppm} marché{'s' if hors_ppm > 1 else ''} passé{'s' if hors_ppm > 1 else ''} hors Plan de Passation des Marchés ;",
-             f"{regul} marché{'s' if regul > 1 else ''} de régularisation ;",
-             f"{impact} étape{'s' if impact > 1 else ''} comportant une irrégularité impactant l'attribution du marché."])
-    freq = Counter(d for g in groupes.values() for d, ents in g.items() for _ in ents)
-    if freq:
-        R.para("Les irrégularités les plus fréquentes (nombre d'entités concernées) sont :")
-        R.puces([f"{d} ({n})" for d, n in freq.most_common(5)])
-    R.a_completer("Causes profondes exprimées lors des séances de restitution (méconnaissance des procédures, insuffisance de formation, documents types, pressions…).")
+    impact = 0
+    for c in controles:
+        for ce in ControleEtape.query.filter_by(id_controle=c.id).all():
+            if Irregularite.query.filter_by(id_controle_etape=ce.id, impacte_attribution=True).first():
+                impact += 1
+    _para(doc, "Dans l’échantillon : %s marché(s) hors PPM, %s marché(s) de régularisation et %s étape(s) "
+               "comportant une irrégularité impactant l’attribution." % (_nb(hors_ppm), _nb(regul), _nb(impact)))
+    _para(doc, "Les principales causes de non-conformité constatées sont les suivantes : " + A_COMPLETER)
+    _para(doc, "Selon les réponses des PRMP aux lettres d’information, la majorité des irrégularités s’expliquent "
+               "par : " + A_COMPLETER)
 
-    # ============================ 5. RECOMMANDATIONS ============================
-    R.titre("5. PRINCIPALES RECOMMANDATIONS ET PROPOSITIONS D'AMÉLIORATION")
-    R.para(f"Compte tenu de ces résultats, des recommandations et suggestions sont formulées à l'endroit des autorités contractantes (Tableau {R.n_tableau + 1}).")
-    lignes_reco = []
-    for e in entites:
-        textes = []
-        for r in Recommandation.query.filter_by(id_entite=e.id).all():
-            if r.texte not in textes: textes.append(r.texte)
-        for c in (x for x in controles if x.marche.id_entite == e.id):
+    # ---------------- 5. Recommandations
+    _titre(doc, "5. PRINCIPALES RECOMMANDATIONS ET PROPOSITIONS D’AMELIORATION")
+    _para(doc, "Compte tenu de ces résultats, des recommandations et suggestions sont formulées à l’endroit des "
+               "autorités contractantes et des responsables concernés (Tableau 8).")
+    _legende(doc, "Tableau", "Principales recommandations et/ou propositions d’amélioration")
+    t = _tableau(doc, ["Entités contrôlées", "Principales recommandations et/ou propositions d’amélioration"],
+                 [50, 120])
+    for e, cs in par_entite.items():
+        ids = [c.id for c in cs]
+        recos = OrderedDict()
+        for rc in Recommandation.query.filter(Recommandation.id_controle.in_(ids)).order_by(Recommandation.id).all():
+            recos[rc.texte.strip()] = 1
+        for c in cs:
             for ce in ControleEtape.query.filter_by(id_controle=c.id).all():
-                for irr in Irregularite.query.filter_by(id_controle_etape=ce.id).all():
-                    if irr.recommandation and irr.recommandation not in textes: textes.append(irr.recommandation)
-        lignes_reco.append([e.nom, "\n".join("- " + t for t in textes) if textes else "—"])
-    R.legende_tableau("Principales recommandations et/ou propositions d'amélioration")
-    if lignes_reco:
-        R.tableau(["Entités contrôlées", "Principales recommandations et/ou propositions d'amélioration"], lignes_reco, largeurs=[4.6, 12], taille=9, centrer_apres=9)
+                for ir in Irregularite.query.filter_by(id_controle_etape=ce.id).all():
+                    if ir.recommandation and ir.recommandation.strip():
+                        recos[ir.recommandation.strip()] = 1
+        r = t.add_row()
+        _cell(r.cells[0], e.nom.upper(), bold=True, align=WD_ALIGN_PARAGRAPH.CENTER)
+        c1 = r.cells[1]
+        c1.text = ""
+        if not recos:
+            _ecrire(c1.paragraphs[0], A_COMPLETER, size=10)
+        for k, txt in enumerate(recos):
+            par = c1.paragraphs[0] if k == 0 else c1.add_paragraph()
+            par.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            _ecrire(par, "- " + txt, size=10)
+    _largeurs(t)
 
-    # ============================ 6. CONCLUSION ============================
-    R.titre("6. CONCLUSION")
-    if total:
-        R.para(f"Le contrôle a posteriori des marchés publics réalisé au titre de l'exercice {exercice} porte sur {nombre(total)} dossier{'s' if total > 1 else ''} "
-               f"répartis entre {nombre(len(entites))} entité{'s' if len(entites) > 1 else ''}. Le taux de conformité global s'établit à {pct(conformes, total):.2f} %. "
-               f"{nombre(sum(len(g) for g in groupes.values()))} irrégularité{'s distinctes ont été relevées' if sum(len(g) for g in groupes.values()) > 1 else ' distincte a été relevée'} sur l'ensemble du processus de passation.")
-    R.a_completer("Bilan contrasté, évolution par rapport aux contrôles antérieurs, recommandations stratégiques (moyens de contrôle, formation, sanctions, suivi semestriel des recommandations).")
+    # ---------------- 6. Conclusion
+    _titre(doc, "6. CONCLUSION")
+    _para(doc, "Le contrôle a posteriori des marchés publics réalisé dans la Région %s sur l’exercice %s enregistre "
+               "un taux de conformité de %s (%d dossiers conformes sur %d). %s (comparaison avec les exercices "
+               "antérieurs)." % (region, exercice, _taux(conformes, total), conformes, total, A_COMPLETER))
+    _para(doc, A_COMPLETER + " (synthèse des irrégularités par phase : planification, mise en concurrence, "
+                             "ouverture des plis, évaluation et attribution, gestion contractuelle, réception ; "
+                             "causes profondes).")
+    _para(doc, A_COMPLETER + " (recommandations stratégiques : renforcement du contrôle, suivi semestriel, "
+                             "sanctions, formation, amélioration des documents types).")
+    _saut_page(doc)
 
-    # ============================ ANNEXES ============================
-    R.saut_de_page()
-    R.titre("ANNEXE 1 - Fiches d'exploitation (par entité contrôlée)")
-    for e in entites:
-        R.para(e.nom, gras=True, align=WD_ALIGN_PARAGRAPH.LEFT)
-        R.tableau(["Référence", "Objet", "Nature", "Mode", "Montant (Ar)", "Note", "Conclusion"],
-                  [[c.marche.reference, c.marche.objet, c.marche.nature.libelle, ABREV_MODES.get(c.marche.mode_passation.libelle, c.marche.mode_passation.libelle),
-                    ar(float(c.marche.montant)), f"{c.note_globale}" if c.note_globale is not None else "—", "Conforme" if c.conclusion == "CONFORME" else "Non conforme"]
-                   for c in controles if c.marche.id_entite == e.id],
-                  taille=8, largeurs=[2.6, 4.6, 2.2, 1.8, 2.5, 1.1, 2.0], centrer_apres=2)
-    R.titre("ANNEXE 2 - Liste des contrôleurs")
-    agents = Utilisateur.query.filter(Utilisateur.role.in_(["COLLECTE", "VERIFICATION", "ANALYSE", "VALIDATION", "PCNM"]), Utilisateur.actif.is_(True)).order_by(Utilisateur.nom).all()
-    R.tableau(["Noms", "Fonctions"], [[f"{(u.nom or '').upper()} {u.prenom or ''}".strip(), ROLES.get(u.role, u.role)] for u in agents] or [["—", "—"]],
-              largeurs=[9, 7], taille=10, centrer_apres=9)
-    R.titre("ANNEXE 3 - Calendriers de contrôle")
-    cal = []
-    for e in entites:
-        cs = [c for c in controles if c.marche.id_entite == e.id]
-        d1 = min(c.date_controle for c in cs); d2 = max(c.date_validation.date() for c in cs)
-        cal.append([e.nom, f"{d1.day:02d}/{d1.month:02d}/{d1.year} au {d2.day:02d}/{d2.month:02d}/{d2.year}"])
-    R.tableau(["Entités contrôlées", "Date des opérations"], cal or [["—", "—"]], largeurs=[10, 6.5], taille=10, centrer_apres=9)
+    # ---------------- Annexes
+    _titre(doc, "ANNEXE 1 - Fiches d’exploitation (par entité contrôlée)")
+    for e, cs in par_entite.items():
+        _para(doc, e.nom, bold=True, align=WD_ALIGN_PARAGRAPH.LEFT)
+        t = _tableau(doc, ["Référence", "Objet", "Nature", "Mode", "Montant (Ar)", "Note", "Conclusion"],
+                     [24, 50, 20, 20, 24, 12, 22])
+        for c in cs:
+            r = t.add_row()
+            vals = [c.marche.reference or "—", c.marche.objet, nat(c), mod(c), _montant(c.marche.montant),
+                    str(c.note_globale if c.note_globale is not None else "—"),
+                    {"CONFORME": "Conforme", "NON_CONFORME": "Non conforme"}.get(_val(c.conclusion), "En cours")]
+            for k, v in enumerate(vals):
+                _cell(r.cells[k], v, size=8.5)
+        _largeurs(t)
+        _para(doc)
+    _saut_page(doc)
 
-    sortie = io.BytesIO(); doc.save(sortie); sortie.seek(0)
-    return sortie, exercice
+    _titre(doc, "ANNEXE 2 - Liste des contrôleurs")
+    ids = set()
+    for c in controles:
+        for ce in ControleEtape.query.filter_by(id_controle=c.id).all():
+            if ce.id_utilisateur:
+                ids.add(ce.id_utilisateur)
+        for uid in (c.id_utilisateur_assigne, c.id_utilisateur_validateur):
+            if uid:
+                ids.add(uid)
+    agents = Utilisateur.query.filter(Utilisateur.id.in_(ids)).order_by(Utilisateur.nom).all() if ids else []
+    t = _tableau(doc, ["NOMS", "FONCTIONS"], [85, 85])
+    if not agents:
+        r = t.add_row()
+        _cell(r.cells[0], A_COMPLETER)
+        _cell(r.cells[1], A_COMPLETER)
+    for u in agents:
+        r = t.add_row()
+        _cell(r.cells[0], " ".join(x for x in [u.nom, u.prenom] if x))
+        _cell(r.cells[1], _libelle_fonction(u))
+    _largeurs(t)
+    _para(doc)
 
+    _titre(doc, "ANNEXE 3 - Calendriers de contrôle")
+    t = _tableau(doc, ["Entités contrôlées", "Date des opérations"], [100, 70])
+    for e, cs in par_entite.items():
+        d = [c.date_controle for c in cs if c.date_controle]
+        r = t.add_row()
+        _cell(r.cells[0], e.nom)
+        _cell(r.cells[1], _periode(d) if d else A_COMPLETER)
+    _largeurs(t)
 
-def OrderedDict_():
-    from collections import OrderedDict
-    return OrderedDict()
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf, exercice

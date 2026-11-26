@@ -56,6 +56,8 @@ def create_app(config=None):
     from routes.transferts import transferts_bp
     from routes.preuves import preuves_bp
     from routes.notifications_prmp import notif_prmp_bp
+    from routes.observations import observations_bp
+    from routes.envois import envois_bp 
     app.register_blueprint(marches_bp, url_prefix="/api/marches")
     app.register_blueprint(controles_bp, url_prefix="/api/controles")
     app.register_blueprint(documents_bp, url_prefix="/api/documents")
@@ -73,6 +75,8 @@ def create_app(config=None):
     app.register_blueprint(transferts_bp, url_prefix="/api")
     app.register_blueprint(preuves_bp, url_prefix="/api")
     app.register_blueprint(notif_prmp_bp,url_prefix='/api')
+    app.register_blueprint(observations_bp, url_prefix="/api/observations")
+    app.register_blueprint(envois_bp, url_prefix="/api/envois")
     proteger_api(app)
     return app
 

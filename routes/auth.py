@@ -5,26 +5,30 @@ gestion des comptes (administrateur).
 Les codes à 6 chiffres sont stockés hachés, valables 10 minutes, limités à 5 essais,
 à usage unique. Un compte créé via l'inscription reçoit le rôle INVITE (lecture seule) :
 un administrateur peut ensuite lui attribuer un autre rôle.
+
+Organisation : ADMIN = CC / directeur (même rôle) ; CHEF_SERVICE, CV (contrôleur vérificateur)
+appartiennent à un service (A, B ou C) ; un service n'a qu'un chef de service actif.
 """
 import json
 import random
 import re
 from datetime import datetime, timedelta
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from sqlalchemy import func
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask import Blueprint, request, jsonify, g
 import mailer
 from extensions import db
-from models import Utilisateur, CodeVerification
+from models import Utilisateur, CodeVerification, Service
 from securite import creer_jeton, connexion_requise, role_requis
 auth_bp = Blueprint("auth", __name__)
 
 DUREE_CODE_MIN = 10
 MAX_TENTATIVES = 5
 DELAI_RENVOI_S = 60
-ROLES = ["ADMIN", "COLLECTE", "VERIFICATION", "ANALYSE", "VALIDATION", "PCNM", "ENTITE", "INVITE"]
+ROLES = ["ADMIN", "COLLECTE", "VERIFICATION", "ANALYSE", "VALIDATION", "PCNM", "ENTITE", "INVITE",
+         "CHEF_SERVICE", "CV"]
+ROLES_SERVICE = ("CHEF_SERVICE", "CV")   # rôles rattachés à un service
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -98,8 +102,26 @@ def _erreur_envoi(e):
 
 
 def _utilisateur_en_dict(u):
+    service = db.session.get(Service, u.id_service) if u.id_service else None
     return {"id": u.id, "nom": u.nom, "prenom": u.prenom, "email": u.email, "login": u.login,
-            "role": u.role, "actif": u.actif}
+            "role": u.role, "actif": u.actif,
+            "id_service": u.id_service, "service": service.nom if service else None}
+
+
+def _valider_service(role, id_service, sauf_id=None):
+    """Contrôle le service d'un compte. Retourne (id_service à enregistrer, message d'erreur ou None).
+    CHEF_SERVICE, CV exigent un service ; un service n'a qu'un chef de service actif."""
+    if role not in ROLES_SERVICE:
+        return None, None
+    if not id_service or db.session.get(Service, id_service) is None:
+        return None, "Choisis le service de cet utilisateur (Service A, B ou C)."
+    if role == "CHEF_SERVICE":
+        autre = Utilisateur.query.filter(
+            Utilisateur.id_service == id_service, Utilisateur.role == "CHEF_SERVICE",
+            Utilisateur.actif.is_(True), Utilisateur.id != (sauf_id or 0)).first()
+        if autre:
+            return None, "Ce service a déjà un chef de service."
+    return id_service, None
 
 
 # ----------------------------------------------------------------- connexion
@@ -112,6 +134,7 @@ def login():
     if not utilisateur.actif:
         return jsonify({"erreur": "Ce compte est désactivé."}), 403
     return jsonify({**_utilisateur_en_dict(utilisateur), "jeton": creer_jeton(utilisateur)})
+
 
 # ----------------------------------------------------------------- inscription (code par e-mail)
 @auth_bp.route("/inscription", methods=["POST"])
@@ -189,7 +212,7 @@ def renvoyer_code():
             return _erreur_envoi(e)
         return jsonify(reponse)
 
-       # réinitialisation
+    # réinitialisation
     utilisateur = _par_email(email)
     if not utilisateur or not utilisateur.actif:
         return jsonify({"erreur": "Aucun compte n'est associé à cette adresse e-mail."}), 404
@@ -220,6 +243,7 @@ def mot_de_passe_oublie():
             return _erreur_envoi(e)
     return jsonify({"ok": True, "email": email, "mode_dev": not mailer.smtp_configure()})
 
+
 @auth_bp.route("/reinitialiser/verifier", methods=["POST"])
 def verifier_code_reinitialisation():
     d = request.get_json() or {}
@@ -231,6 +255,7 @@ def verifier_code_reinitialisation():
     if not utilisateur or not utilisateur.actif:
         return jsonify({"erreur": "Compte introuvable ou désactivé."}), 400
     return jsonify({"ok": True})
+
 
 @auth_bp.route("/reinitialiser", methods=["POST"])
 def reinitialiser():
@@ -261,7 +286,9 @@ def lister_utilisateurs():
 @auth_bp.route("/utilisateurs", methods=["POST"])
 @role_requis("ADMIN")
 def creer_utilisateur():
-    """Création d'un compte par un administrateur (sans vérification par e-mail)."""
+    """Création d'un compte par le directeur (sans vérification par e-mail).
+    Champs : nom, prenom, email, login, mot_de_passe, role, id_service (obligatoire pour
+    CHEF_SERVICE, CV)."""
     d = request.get_json() or {}
     nom, login_ = (d.get("nom") or "").strip(), (d.get("login") or "").strip()
     email = (d.get("email") or "").strip().lower() or None
@@ -278,9 +305,13 @@ def creer_utilisateur():
         return jsonify({"erreur": "Ce login est déjà utilisé."}), 409
     if email and _par_email(email):
         return jsonify({"erreur": "Cette adresse e-mail est déjà utilisée."}), 409
+    id_service, erreur = _valider_service(d["role"], d.get("id_service"))
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
 
     utilisateur = Utilisateur(nom=nom, prenom=d.get("prenom"), email=email, login=login_, role=d["role"],
-                              mot_de_passe_hash=generate_password_hash(d["mot_de_passe"]), id_entite=d.get("id_entite"))
+                              mot_de_passe_hash=generate_password_hash(d["mot_de_passe"]),
+                              id_entite=d.get("id_entite"), id_service=id_service)
     db.session.add(utilisateur)
     db.session.commit()
     return jsonify(_utilisateur_en_dict(utilisateur)), 201
@@ -305,6 +336,10 @@ def changer_mot_de_passe():
 @role_requis("ADMIN")
 def basculer_actif(id_utilisateur):
     utilisateur = Utilisateur.query.get_or_404(id_utilisateur)
+    if not utilisateur.actif:  # réactivation : un service ne peut avoir qu'un chef actif
+        _, erreur = _valider_service(utilisateur.role, utilisateur.id_service, sauf_id=utilisateur.id)
+        if erreur:
+            return jsonify({"erreur": erreur}), 409
     utilisateur.actif = not utilisateur.actif
     db.session.commit()
     return jsonify(_utilisateur_en_dict(utilisateur))
@@ -313,12 +348,18 @@ def basculer_actif(id_utilisateur):
 @auth_bp.route("/utilisateurs/<int:id_utilisateur>/role", methods=["PUT"])
 @role_requis("ADMIN")
 def changer_role(id_utilisateur):
+    """Change le rôle (titre) et, si besoin, le service : {"role": "CV", "id_service": 2}."""
     d = request.get_json() or {}
     if d.get("role") not in ROLES:
         return jsonify({"erreur": "Rôle invalide."}), 400
     if g.utilisateur.id == id_utilisateur:
         return jsonify({"erreur": "Tu ne peux pas modifier ton propre rôle."}), 400
     utilisateur = Utilisateur.query.get_or_404(id_utilisateur)
+    id_service, erreur = _valider_service(d["role"], d.get("id_service", utilisateur.id_service),
+                                          sauf_id=utilisateur.id)
+    if erreur:
+        return jsonify({"erreur": erreur}), 400
     utilisateur.role = d["role"]
+    utilisateur.id_service = id_service
     db.session.commit()
     return jsonify(_utilisateur_en_dict(utilisateur))
